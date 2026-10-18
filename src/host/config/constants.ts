@@ -68,8 +68,13 @@ export function defaultCodeBuddyProfile(): AcpAgentProfile | undefined {
     // 这里的 dontAsk 就是「让它按自己的判断干」，与子智能体版的默认一致。
     args: [cli, '--acp', '--acp-transport', 'stdio', '--permission-mode', 'dontAsk', '--model', DEFAULT_CODEBUDDY_MODEL],
     env: {},
+    // 留空表示「让 Agent 自己报」。CodeBuddy 在 session/new 里给了 availableModels
+    // （deepseek-v4.1-flash / glm-5.3 / kimi-k3-1 …）和一个 thought_level 选项
+    // （low/medium/high/xhigh/max），但两者都只有在**建过一次会话**之后才拿得到。
+    // 所以 discoverModels 必须开：关掉的话模型选择器里只剩一个 default，
+    // 推理等级那一行也不会出现。
     models: [],
-    discoverModels: false,
+    discoverModels: true,
     // 兜底：万一 CodeBuddy 仍然发来 permission 请求，选 allow 而不是卡住。
     // 想收紧就改成 read-only（只放行 read/search/fetch）或 ask（接 dsh 审批框）。
     permission: 'allow',

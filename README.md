@@ -37,6 +37,7 @@ codebuddy:
   args: [<cli>, --acp, --acp-transport, stdio, --permission-mode, dontAsk, --model, deepseek-v4.1-flash]
   permission: allow
   systemPrompt: drop
+  discoverModels: true
 ```
 
 显式配了 `agents` 之后，默认路由自动让位。
@@ -86,7 +87,7 @@ codebuddy:
 | --- | --- | --- |
 | `permission` | `allow` | CodeBuddy 自己执行工具，每问一次权限 dsh 就弹一次框，一个任务几十次调用没法用。可收紧成 `read-only`（只放行 read/search/fetch）或 `ask`（接 dsh 原生审批框）。 |
 | `systemPrompt` | `drop` | 不把 dsh 的 system prompt 塞给 CodeBuddy，它有自己的角色设定与工具规范。改成 `forward` 则转发。 |
-| `models` / `discoverModels` | `[]` / `false` | 模型列表。留空时只暴露一个 `default`，实际模型由 `args` 里的 `--model` 决定——**最省事也最稳**，因为发现模型需要为每个路由拉起一次 CLI。 |
+| `models` / `discoverModels` | `[]` / `true` | 默认让 CodeBuddy 自己报模型。它在 `session/new` 里给出 `availableModels`（`deepseek-v4.1-flash`、`glm-5.3`、`kimi-k3-1`…）和一个 `thought_level` 选项（`low`/`medium`/`high`/`xhigh`/`max`），两者都只有在建过一次会话后才拿得到——所以关掉发现会同时失去「模型列表」和「推理等级」两行。代价是首次打开模型选择器要等一次冷启动（实测握手 6.4s、建会话 7.7s）；超过 25s 还没答就放弃，选择器退回单个 default，不会变成第二次转圈。`models` 里写死列表可跳过这次发现。 |
 | `imageInput` | `auto` | 按 ACP 握手里 `promptCapabilities.image` 决定；`force` / `off` 可覆盖 Agent 的漏报。 |
 | `showToolCalls` | `true` | 把工具调用与计划渲染进推理块。 |
 | `contextWindow` | `200000` | 兜底值；Agent 上报过就以它为准。 |
@@ -94,10 +95,12 @@ codebuddy:
 
 插件带一个设置页：设置 → **ACP Agents**，可以表单化管理路由、导入其他 ACP 客户端的 JSON 配置、按已保存命令发现模型。
 
+设置页只列出**写进配置**的路由。插件自动挂的那条默认路由是合成的，不会出现在这里（也不占配置），所以想在这个页面里编辑它，就把上面那段 YAML 写进 profile——写进去之后内置默认自动让位，两者完全等价。
+
 ## 已知限制
 
-- **网关端口冲突**：CodeBuddy 系 CLI 即使走 `--acp --acp-transport stdio`，启动时仍会绑一个本地网关端口（实测 `127.0.0.1:4408`）。同机已有 CodeBuddy / WorkBuddy 实例在跑时，这里会以 `EADDRINUSE` 直接退出，表现为 `initialize failed: ACP connection closed`。插件会把 stderr 尾部连同原因一起抛出，并附一条 hint。
-- **环境变量继承**：子进程拿到的是 `process.env` 加上路由的 `env`。如果 dsh 本身是从 CodeBuddy/WorkBuddy 的终端里启动的，`CODEBUDDY_*` 会被继承下去，可能把 CodeBuddy 推进网关模式。从桌面图标正常启动没有这个问题。
+- **网关端口**：CodeBuddy 系 CLI 即使走 `--acp --acp-transport stdio`，启动时仍会 bind 一个本地网关端口，读完 `SERVER__PORT` 就照它来。宿主（WorkBuddy / CodeBuddy 桌面端）正好用这两个变量发布自己的网关地址，于是继承下来就是**父子抢同一个端口**：子进程一启动就 `EADDRINUSE`，上层只看到 `initialize failed: ACP connection closed`。插件默认把 `SERVER__*` / `CODEBUDDY_*` / `CLAUDE_*` 从子进程环境里摘掉（见下一条），所以撞上它现在只可能是「别的 CodeBuddy 系进程真的占着」或「路由的 `env` 又把它写回去了」。
+- **环境变量**：子进程拿到的是**净化过**的 `process.env` 加上路由的 `env`。净化规则是按前缀摘：`CODEBUDDY_`（配置目录、宿主身份、会话 id、打包形态）、`CLAUDE_`、`SERVER__`（宿主网关端口）——留着它们会让子进程以为自己是宿主的一部分。凭据类例外，会照常传下去：`CODEBUDDY_API_KEY`、`CODEBUDDY_AUTH_TOKEN`、`CODEBUDDY_BASE_URL`、`CODEBUDDY_INTERNET_ENVIRONMENT`。真需要某条被摘掉的变量，在路由的 `env` 里写回去即可，它是后合并的。
 - **link 安装下的 peer 依赖**：以 `link:` 方式装进 profile 时，插件会从本仓库的 `node_modules` 解析 `@deepseek-ai/dsh-llm`，和宿主不是同一个实例。所以适配器的失败一律以带内 `finish` 返回，不依赖 `instanceof LlmError`。
 
 ## 开发
@@ -106,7 +109,7 @@ codebuddy:
 npm install
 npm run build      # tsdown → dist/index.js + dist/client.cjs
 npm run typecheck  # tsc --noEmit
-npm test           # vitest，57 项
+npm test           # vitest，65 项
 ```
 
 装进本机 profile 做真机验证：

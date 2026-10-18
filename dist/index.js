@@ -70,7 +70,7 @@ function defaultCodeBuddyProfile() {
 		],
 		env: {},
 		models: [],
-		discoverModels: false,
+		discoverModels: true,
 		permission: "allow",
 		imageInput: "auto",
 		systemPrompt: "drop",
@@ -10107,6 +10107,58 @@ new Set([
 ]);
 new Set([CLIENT_METHODS.session_update, CLIENT_METHODS.elicitation_complete]);
 //#endregion
+//#region src/host/service/child-env.ts
+/**
+* 宿主的环境变量会顺着 `...process.env` 漏给 ACP 子进程，把子进程拽进宿主的身份里。
+*
+* 最要命的是 `SERVER__PORT` / `SERVER__HOST`：dsh 跑在 CodeBuddy 系宿主里时，宿主用这两个
+* 变量发布自己的网关端口，而 CodeBuddy CLI 启动时也会读它们去 bind 同一个地址——于是子进程
+* 一启动就 `EADDRINUSE 127.0.0.1:<宿主端口>`，进程退出，客户端只看到「ACP connection
+* closed」。实测（2026-10）：继承环境下 initialize 直接失败；摘掉这些前缀后同一个 CLI
+* 6.4s 完成握手、7.7s 建好会话并正常报出全部模型。所以那不是端口冲突，是父子同抢一个端口。
+*
+* 其余同类污染：
+* - `CODEBUDDY_CONFIG_DIR`：子进程会读写宿主的配置与会话目录，两边的会话混在一个桶里。
+* - `CODEBUDDY_HOST` / `CODEBUDDY_HOST_CAPABILITIES` / `CODEBUDDY_GATEWAY_*`：让它以为
+*   自己是宿主的一部分，去连宿主的网关、用宿主的鉴权口令。
+* - `CODEBUDDY_SESSION_ID` / `CODEBUDDY_CONVERSATION_*` / `CODEBUDDY_TOOL_CALL_ID`：把宿主
+*   正在进行的会话 id 塞进子进程自己的会话，日志与审批都会串。
+* - `CODEBUDDY_FORCE_HEADLESS_BUNDLE` / `CODEBUDDY_FORCE_LITE_WB_BUNDLE`：把宿主选的打包
+*   形态强加给子进程，而我们并不知道那个形态是否带 ACP。
+*
+* 只按前缀摘，不按具体名字摘：这条规则要能跟着对方版本演进继续生效，新增的同类变量自动
+* 被挡在外面。任何一条都可以在 profile 的 `env` 里按路由加回去（`env` 是后合并的）。
+*/
+const STRIPPED_PREFIXES = [
+	"CODEBUDDY_",
+	"CLAUDE_",
+	"SERVER__"
+];
+/**
+* 前缀之内但值得跨进程传的少数几个。
+*
+* 凭据类：用户可能就是用环境变量登录的，摘掉等于让它变成未登录。`INTERNET_ENVIRONMENT`
+* 是环境路由（内网/公网端点），跟「我是谁、我绑哪个端口」无关，摘掉反而可能连不上。
+*/
+const KEPT = new Set([
+	"CODEBUDDY_API_KEY",
+	"CODEBUDDY_AUTH_TOKEN",
+	"CODEBUDDY_BASE_URL",
+	"CODEBUDDY_INTERNET_ENVIRONMENT"
+]);
+/**
+* The environment an ACP child should start with: everything the host has, minus the
+* variables that would make it act as part of the host instead of as its own agent.
+*/
+function childEnv(source = process.env, stripped = STRIPPED_PREFIXES) {
+	const env = {};
+	for (const [key, value] of Object.entries(source)) {
+		const upper = key.toUpperCase();
+		if (!stripped.some((prefix) => upper.startsWith(prefix)) || KEPT.has(upper)) env[key] = value;
+	}
+	return env;
+}
+//#endregion
 //#region src/host/service/prompt-capabilities.ts
 /** Read an `initialize` answer's prompt capabilities; every absent flag is a negative. */
 function promptCapabilitiesOf(capabilities) {
@@ -10194,6 +10246,14 @@ var PromptCapabilitiesCache = class {
 //#region src/host/service/acp-agent.ts
 const AUTH_REQUIRED_CODE = -32e3;
 const STDERR_TAIL_BYTES = 4096;
+/**
+* How long a catalog probe may take.
+*
+* 模型发现是「打开选择器」时顺手做的旁路请求，不能把它变成第二次长时间转圈：Agent 正忙
+* （正在跑一个回合）时 `session/new` 会排在后面，等多久取决于那一轮什么时候结束。超时就
+* 认输，选择器退回单个 default，等用户下次打开再试。
+*/
+const DISCOVERY_TIMEOUT_MS = 25e3;
 /**
 * Whether spawning this command needs a shell.
 *
@@ -10415,11 +10475,11 @@ var AcpAgentProcess = class {
 	}
 	async discoverModels(cwd, signal) {
 		if (this.advertised !== void 0) return this.advertised;
-		this.discovering ??= this.newSession(this.liveCwd ?? this.lastCwd ?? cwd).then((session) => {
+		this.discovering ??= this.timed(DISCOVERY_TIMEOUT_MS, `did not answer session/new within ${DISCOVERY_TIMEOUT_MS}ms while listing models`, this.newSession(this.liveCwd ?? this.lastCwd ?? cwd).then((session) => {
 			this.closeSession(session);
 			this.advertised ??= session.models.available;
 			return this.advertised;
-		}).finally(() => {
+		})).finally(() => {
 			this.discovering = void 0;
 		});
 		return this.withAbort(this.discovering, signal);
@@ -10476,7 +10536,7 @@ var AcpAgentProcess = class {
 		const child = spawn(profile.command, profile.args, {
 			cwd,
 			env: {
-				...process.env,
+				...childEnv(),
 				...profile.env
 			},
 			stdio: [
@@ -10558,13 +10618,16 @@ var AcpAgentProcess = class {
 		return tail.length === 0 ? "" : `\n${tail}${this.portHint(tail)}`;
 	}
 	/**
-	* CodeBuddy 系 CLI 即使走 `--acp --acp-transport stdio`，也会先绑一个本地网关端口；
-	* 端口被占就直接退出，stderr 只留一行 EADDRINUSE。这台机器上同时装着 CodeBuddy /
-	* WorkBuddy 时必然撞上，光看「ACP connection closed」根本猜不到原因。
+	* CodeBuddy 系 CLI 启动时会 bind 一个本地网关端口，被占就直接退出，stderr 只留一行
+	* EADDRINUSE，上层只能看到「ACP connection closed」。
+	*
+	* 最常见的成因是宿主的 `SERVER__PORT` 被继承下来（见 `child-env.ts`，插件的默认行为已经
+	* 把它摘掉了），所以现在还撞上，就只剩两种可能：别的 CodeBuddy 系进程真的占着那个端口，
+	* 或者 profile 的 `env` 又把它写回去了。
 	*/
 	portHint(tail) {
 		if (!tail.includes("EADDRINUSE")) return "";
-		return "\n  hint: another CodeBuddy-family process (CodeBuddy CLI, WorkBuddy, or a leaked run) already owns that gateway port. Quit it and retry, or keep a copy of the CLI for this plugin alone.";
+		return "\n  hint: the agent could not bind its local gateway port. The plugin strips SERVER__PORT / CODEBUDDY_* from the child environment by default, so this now means either another CodeBuddy-family process (CodeBuddy CLI, WorkBuddy, a leaked run) owns that port, or this route's `env` sets it again.";
 	}
 	startError(message, cause) {
 		return new LlmError(`${PLUGIN_ID}: ACP agent "${this.options.route}" ${message}${this.stderrSuffix()}`, "TRANSPORT", cause === void 0 ? void 0 : { cause });
@@ -10581,6 +10644,19 @@ var AcpAgentProcess = class {
 			signal.addEventListener("abort", onAbort, { once: true });
 			promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
 		});
+	}
+	/** Reject with a named reason instead of waiting forever for an agent that never answers. */
+	async timed(ms, why, action) {
+		let timer;
+		const timeout = new Promise((_, reject) => {
+			timer = setTimeout(() => reject(new LlmError(`${PLUGIN_ID}: ACP agent "${this.options.route}" ${why}`, "TRANSPORT")), ms);
+		});
+		action.catch(() => {});
+		try {
+			return await Promise.race([action, timeout]);
+		} finally {
+			clearTimeout(timer);
+		}
 	}
 };
 //#endregion

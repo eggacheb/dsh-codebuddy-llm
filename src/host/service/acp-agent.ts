@@ -21,6 +21,7 @@ import { client as createClientApp, methods, ndJsonStream, PROTOCOL_VERSION } fr
 import { LlmError } from '@deepseek-ai/dsh-llm'
 import { PLUGIN_ID } from '../../shared/constants.ts'
 import { DEFAULT_MODEL_ID } from '../config/constants.ts'
+import { childEnv } from './child-env.ts'
 import { promptCapabilitiesOf } from './prompt-capabilities.ts'
 
 export interface AcpAdvertisedModel {
@@ -78,6 +79,15 @@ interface LegacyModels {
 const AUTH_REQUIRED_CODE = -32000
 
 const STDERR_TAIL_BYTES = 4096
+
+/**
+ * How long a catalog probe may take.
+ *
+ * 模型发现是「打开选择器」时顺手做的旁路请求，不能把它变成第二次长时间转圈：Agent 正忙
+ * （正在跑一个回合）时 `session/new` 会排在后面，等多久取决于那一轮什么时候结束。超时就
+ * 认输，选择器退回单个 default，等用户下次打开再试。
+ */
+const DISCOVERY_TIMEOUT_MS = 25_000
 
 /**
  * Whether spawning this command needs a shell.
@@ -330,11 +340,15 @@ export class AcpAgentProcess {
       return this.advertised
     // Catalog reads resolve every model at once; they share one probe session.
     // 用这个进程已经在的目录：设置页取模型列表不该把正在对话的会话按到别的目录去。
-    this.discovering ??= this.newSession(this.liveCwd ?? this.lastCwd ?? cwd).then((session) => {
-      this.closeSession(session)
-      this.advertised ??= session.models.available
-      return this.advertised
-    }).finally(() => {
+    this.discovering ??= this.timed(
+      DISCOVERY_TIMEOUT_MS,
+      `did not answer session/new within ${DISCOVERY_TIMEOUT_MS}ms while listing models`,
+      this.newSession(this.liveCwd ?? this.lastCwd ?? cwd).then((session) => {
+        this.closeSession(session)
+        this.advertised ??= session.models.available
+        return this.advertised
+      }),
+    ).finally(() => {
       this.discovering = undefined
     })
     return this.withAbort(this.discovering, signal)
@@ -404,7 +418,9 @@ export class AcpAgentProcess {
     this.lastCwd = cwd
     const child = spawn(profile.command, profile.args, {
       cwd,
-      env: { ...process.env, ...profile.env },
+      // 宿主的环境变量会把子进程拽进宿主的身份（尤其是 SERVER__PORT：两边抢同一个网关
+      // 端口，子进程一启动就 EADDRINUSE）。先摘干净，再叠用户按路由写的 env。
+      env: { ...childEnv(), ...profile.env },
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
       shell: needsShell(profile.command),
@@ -495,14 +511,17 @@ export class AcpAgentProcess {
   }
 
   /**
-   * CodeBuddy 系 CLI 即使走 `--acp --acp-transport stdio`，也会先绑一个本地网关端口；
-   * 端口被占就直接退出，stderr 只留一行 EADDRINUSE。这台机器上同时装着 CodeBuddy /
-   * WorkBuddy 时必然撞上，光看「ACP connection closed」根本猜不到原因。
+   * CodeBuddy 系 CLI 启动时会 bind 一个本地网关端口，被占就直接退出，stderr 只留一行
+   * EADDRINUSE，上层只能看到「ACP connection closed」。
+   *
+   * 最常见的成因是宿主的 `SERVER__PORT` 被继承下来（见 `child-env.ts`，插件的默认行为已经
+   * 把它摘掉了），所以现在还撞上，就只剩两种可能：别的 CodeBuddy 系进程真的占着那个端口，
+   * 或者 profile 的 `env` 又把它写回去了。
    */
   private portHint(tail: string): string {
     if (!tail.includes('EADDRINUSE'))
       return ''
-    return '\n  hint: another CodeBuddy-family process (CodeBuddy CLI, WorkBuddy, or a leaked run) already owns that gateway port. Quit it and retry, or keep a copy of the CLI for this plugin alone.'
+    return '\n  hint: the agent could not bind its local gateway port. The plugin strips SERVER__PORT / CODEBUDDY_* from the child environment by default, so this now means either another CodeBuddy-family process (CodeBuddy CLI, WorkBuddy, a leaked run) owns that port, or this route\'s `env` sets it again.'
   }
 
   private startError(message: string, cause?: unknown): LlmError {
@@ -533,5 +552,20 @@ export class AcpAgentProcess {
       signal.addEventListener('abort', onAbort, { once: true })
       promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
     })
+  }
+
+  /** Reject with a named reason instead of waiting forever for an agent that never answers. */
+  private async timed<T>(ms: number, why: string, action: Promise<T>): Promise<T> {
+    let timer: NodeJS.Timeout | undefined
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new LlmError(`${PLUGIN_ID}: ACP agent "${this.options.route}" ${why}`, 'TRANSPORT')), ms)
+    })
+    action.catch(() => {})
+    try {
+      return await Promise.race([action, timeout])
+    }
+    finally {
+      clearTimeout(timer)
+    }
   }
 }

@@ -87,7 +87,7 @@ codebuddy:
 | --- | --- | --- |
 | `permission` | `allow` | CodeBuddy 自己执行工具，每问一次权限 dsh 就弹一次框，一个任务几十次调用没法用。可收紧成 `read-only`（只放行 read/search/fetch）或 `ask`（接 dsh 原生审批框）。 |
 | `systemPrompt` | `drop` | 不把 dsh 的 system prompt 塞给 CodeBuddy，它有自己的角色设定与工具规范。改成 `forward` 则转发。 |
-| `models` / `discoverModels` | `[]` / `true` | 默认让 CodeBuddy 自己报模型。它在 `session/new` 里给出 `availableModels`（`deepseek-v4.1-flash`、`glm-5.3`、`kimi-k3-1`…）和一个 `thought_level` 选项（`low`/`medium`/`high`/`xhigh`/`max`），两者都只有在建过一次会话后才拿得到——所以关掉发现会同时失去「模型列表」和「推理等级」两行。代价是首次打开模型选择器要等一次冷启动（实测握手 6.4s、建会话 7.7s）；超过 25s 还没答就放弃，选择器退回单个 default，不会变成第二次转圈。`models` 里写死列表可跳过这次发现。 |
+| `models` / `discoverModels` | `[]` / `true` | 默认让 CodeBuddy 自己报模型。它在 `session/new` 里给出 `availableModels`（实测 20 个：`fast-model`、`deepseek-v4.1-flash`、`glm-5.3`、`kimi-k3-1`、`deepseek-v4-pro`…）和一个 `thought_level` 选项（`low`/`high`/`max`/`enabled`，`enabled` 就是「用模型自带的默认档」），两者都只有在建过一次会话后才拿得到——所以关掉发现会同时失去「模型列表」和「推理等级」两行。代价是首次打开模型选择器要等一次冷启动（实测 6.4s）；超过 25s 还没答就放弃，选择器退回单个 default，不会变成第二次转圈。`models` 里写死列表可跳过这次发现。 |
 | `imageInput` | `auto` | 按 ACP 握手里 `promptCapabilities.image` 决定；`force` / `off` 可覆盖 Agent 的漏报。 |
 | `showToolCalls` | `true` | 把工具调用与计划渲染进推理块。 |
 | `contextWindow` | `200000` | 兜底值；Agent 上报过就以它为准。 |

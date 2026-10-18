@@ -75,10 +75,19 @@ export function defaultCodeBuddyProfile(): AcpAgentProfile | undefined {
     // 它每问一次权限，dsh 这边就弹一次审批框，一个任务几十次调用直接没法用。
     // 这里的 dontAsk 就是「让它按自己的判断干」，与子智能体版的默认一致。
     args: [cli, '--acp', '--acp-transport', 'stdio', '--permission-mode', 'dontAsk', '--model', DEFAULT_CODEBUDDY_MODEL],
-    env: {},
+    // 让 CodeBuddy 对「未声明的 ACP 宿主」也应用 Agent 预设。
+    //
+    // 预设默认只对声明过 `clientCapabilities._meta["codebuddy.ai"].mainAgentSupport`
+    // 的宿主开放；我们的客户端没声明，于是被 MainAgentGate 跳过，工具集固定成标准模式的
+    // 全量清单 —— 实测 41,038 token，占一轮对话的 86%。打开这一项后才会去读 settings 里的
+    // `codebuddy.mainAgent.default`：ptc 降到 10,915，minimal 降到 8,329。
+    //
+    // 用 env 而不是让用户改全局设置：`resolveMainAgentPolicy()` 里环境变量的优先级高于
+    // settings，所以这条只影响本路由的子进程，不会波及 WorkBuddy 自己的 sidecar。
+    env: { CODEBUDDY_MAIN_AGENT_ALLOW_UNOPTED: '1' },
     // 留空表示「让 Agent 自己报」。CodeBuddy 在 session/new 里给了 availableModels
     // （deepseek-v4.1-flash / glm-5.3 / kimi-k3-1 …）和一个 thought_level 选项
-    // （low/medium/high/xhigh/max），但两者都只有在**建过一次会话**之后才拿得到。
+    // （low / high / max / enabled），但两者都只有在**建过一次会话**之后才拿得到。
     // 所以 discoverModels 必须开：关掉的话模型选择器里只剩一个 default，
     // 推理等级那一行也不会出现。
     models: [],

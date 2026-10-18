@@ -195,7 +195,7 @@ CODEBUDDY_REPL_TOOLS_INJECT_BUILTIN   // PTC/Minimal 默认开；=0/false 不把
 - **切 `minimal` 后 `currentAgentName` 确实变成 `minimal`，tools 一动不动。** 而 minimal 在 TUI 里的定义是「REPL 里只有 Bash/Edit/Skill，无 Read/Write/Glob/Grep/search/plan/sub-agents/MCP」——最极端的裁剪。它都不生效，说明 ACP 的工具装配**不看 agent 的 tools 白名单**，因此方案 3（自定义 agent 写 `tools:`）同样可判定无效，不必再试。
 - **`INJECT_CATALOG=0` 无效，反证了「41k 是 REPL 目录注入」的假设。** 如果它是，关掉注入必然掉数。
 
-**结论：ACP 这条路上没有任何可用的裁剪开关。** 能选的只剩下面 5 / 7 / 8。
+**结论（当日）：ACP 的启动参数与 `DISABLE_*` 开关全部无效。** 但「无效」的原因不是没有开关，而是预设门禁没开——**第 10 节找到了真正的开关，实测 47.7k → 12.8k**。本节其余内容保留，作为「走错路」的记录。
 
 ### 仍然可选的
 
@@ -207,6 +207,70 @@ CODEBUDDY_REPL_TOOLS_INJECT_BUILTIN   // PTC/Minimal 默认开；=0/false 不把
 | 8 | 上下文窗口拉到 1M | token 不变，占比 24%→4.8% | 一行配置 | 无（不省钱） |
 
 方案 7 有现成参照：`claude-code-acp` 用 `_meta.claudeCode.options` 把 `tools` / `allowedTools` / `disallowedTools` 透传给底层，并靠 `OPTION_REBUILDS_SESSION` 在选项变化时重建会话——说明「适配层透传工具选项」是被实现过的形态，可以直接照这个给 CodeBuddy 提 PR。
+
+## 10. 真正的开关：预设门禁（2026-10-19 追加，推翻第 9 节结论）
+
+第 9 节所有实验都是在**门禁关着**的前提下跑的，所以数字一动不动。
+
+### 开关是什么
+
+CodeBuddy 设置里的「Agent 预设 → 允许未声明的 ACP 宿主」，对应 `codebuddy.mainAgent.allowUnopted`。
+bundle 里有一个专门给 ACP 用的门禁：
+
+```js
+function isStandingMainAgentActive(policy, kind) {
+  return !!policy.enabled && (kind !== "unopted" || policy.allowUnopted)
+}
+
+// MainAgentGate
+isEnabledForSession(session) {
+  const kind = session?.meta?.[HOST_KIND]        // "unopted" | "opted-in" | "native"
+  return kind ? isStandingMainAgentActive(this.policy, kind)
+              : this.isEnabled(session?.meta?.acpConnectionId)
+}
+```
+
+我们的客户端没有在 `initialize` 里声明 `clientCapabilities._meta["codebuddy.ai"].mainAgentSupport`，
+所以是 `unopted`；`allowUnopted` 默认 `false`，预设被整段跳过。这正好解释了第 9 节里最硬的那个反证：
+「`currentAgentName` 变成 minimal 了，tools 却一动不动」——它只是回显请求值，预设并没有激活。
+
+### 环境变量优先于设置
+
+```js
+function resolveMainAgentPolicy(settings, env = process.env) {
+  const block = readMainAgentBlock(settings)
+  const enabled = parseEnvFlag(env.CODEBUDDY_MAIN_AGENT_ENABLED) ?? parseEnabled(block.enabled)
+  const allowUnopted = parseEnvFlag(env.CODEBUDDY_MAIN_AGENT_ALLOW_UNOPTED) ?? block.allowUnopted === true
+  // ...
+}
+```
+
+所以插件可以在 `profile.env` 里注入 `CODEBUDDY_MAIN_AGENT_ALLOW_UNOPTED=1`：只对自己的子进程生效，
+不动用户的全局设置，也就不会连带把 WorkBuddy 的 sidecar 切到预设上。已实测——settings 里
+`allowUnopted: false`，只靠 env，结果同样是 12,835。
+
+### 实测（同一句 `hi`，ACP，`deepseek-v4.1-flash`）
+
+| `mainAgent.default` | 总 token | tools | systemPrompt | skills | conversation |
+|---|---|---|---|---|---|
+| `default`（标准） | 47,711 | 41,038 | 2,806 | 1,385 | 2,418 |
+| `ptc`（Code Mode） | **12,835** | 10,915 | 891 | 369 | 643 |
+| `minimal`（极简） | **9,728** | 8,329 | 608 | 281 | 497 |
+
+`CODEBUDDY_MAIN_AGENT_ENABLED=0` 时回到 47,242，确认总闸同样有效。
+
+### 为什么 `ptc` 有效而 `--tools` 无效
+
+`ptc` 的定义就是 `tools: ["REPL"]`：对外只暴露一个 REPL，其余工具在沙箱里按需 `import`。
+这正是第 4 节 Anthropic Code Mode 的形态。而 `--tools` / `--disallowedTools` / `--agent`
+改的是另一条装配路径，ACP 不读——第 9 节那些尝试注定没有反应，不是参数没解析。
+
+### 落地
+
+- 插件默认注入 `CODEBUDDY_MAIN_AGENT_ALLOW_UNOPTED=1`（`src/host/config/constants.ts`）。
+- 预设名只能从 `~/.codebuddy/settings.json` 的 `codebuddy.mainAgent.default` 读（Web UI 设置页也能改），
+  插件没有参数可以指定它。
+- 不设 preset 就仍是 47.7k；在 1M 窗口里占 4.8%，不影响可用性，只是白花。
 
 ## 参考
 

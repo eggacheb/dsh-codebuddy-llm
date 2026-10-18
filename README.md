@@ -60,6 +60,31 @@ codebuddy:
 
 模型的上下文窗口与推理等级来自 Agent 本身的应答（`usage_update.size` / `thought_level`），按路由缓存在 `$DSH_HOME/cache/dsh-codebuddy-llm/`，重启后首轮即可用。
 
+## 上下文占用
+
+一轮对话的固定开销几乎全在工具定义上。CodeBuddy 的 ACP 会话默认跑「标准」预设，把全部工具（含 MCP、子智能体、Team）的 schema 都塞进上下文——实测 **41,038 token，占 86%**。
+
+它的 Agent 预设（标准 / PTC / 极简 / 创造）默认只对**声明过** `mainAgentSupport` 的宿主开放。我们的 ACP 客户端没声明，会被 `MainAgentGate` 判成 `unopted` 直接跳过，所以光改 `settings.json` 里的 `mainAgent.default` 也不生效——这也解释了为什么 `--tools`、`--disallowedTools`、`--agent` 在 ACP 下全都没反应：它们改的是另一条装配路径。
+
+插件默认往子进程注入 `CODEBUDDY_MAIN_AGENT_ALLOW_UNOPTED=1`（`resolveMainAgentPolicy()` 里环境变量优先于 settings，且只影响这条路由，不动 WorkBuddy 自己的 sidecar），预设才开始生效。实测同一句 `hi`：
+
+| `codebuddy.mainAgent.default` | 总 token | tools | systemPrompt | skills |
+| --- | --- | --- | --- | --- |
+| `default`（标准） | 47,711 | 41,038 | 2,806 | 1,385 |
+| `ptc`（Code Mode） | **12,835** | 10,915 | 891 | 369 |
+| `minimal`（极简） | **9,728** | 8,329 | 608 | 281 |
+
+推荐 `ptc`：工具一个不少，只是收进 REPL 用代码调用，对应 Anthropic 的 [Code execution with MCP](https://www.anthropic.com/engineering/code-execution-with-mcp)（官方给的实测收益是 150k → 2k token）。`minimal` 再省 3k，但没有 Read / Write / Glob / Grep / MCP，日常编码会明显别扭。
+
+预设名只能从 CodeBuddy 自己的设置里读（Web UI 的「Agent 预设」，或直接写文件），插件没法用参数指定：
+
+```json
+// ~/.codebuddy/settings.json
+{ "codebuddy": { "mainAgent": { "default": "ptc" } } }
+```
+
+不设也行——那就是标准预设的 41k，在 1M 窗口里占 4%，不影响可用性，只是白花。
+
 ## 配置
 
 ```yaml
@@ -90,9 +115,9 @@ codebuddy:
 | `models` / `discoverModels` | `[]` / `true` | 默认让 CodeBuddy 自己报模型。它在 `session/new` 里给出 `availableModels`（实测 20 个：`fast-model`、`deepseek-v4.1-flash`、`glm-5.3`、`kimi-k3-1`、`deepseek-v4-pro`…）和一个 `thought_level` 选项（`low`/`high`/`max`/`enabled`，`enabled` 就是「用模型自带的默认档」），两者都只有在建过一次会话后才拿得到——所以关掉发现会同时失去「模型列表」和「推理等级」两行。代价是首次打开模型选择器要等一次冷启动（实测 6.4s）；超过 25s 还没答就放弃，选择器退回单个 default，不会变成第二次转圈。`models` 里写死列表可跳过这次发现。 |
 | `imageInput` | `auto` | 按 ACP 握手里 `promptCapabilities.image` 决定；`force` / `off` 可覆盖 Agent 的漏报。 |
 | `showToolCalls` | `true` | 把工具调用与计划渲染进推理块。 |
-| `contextWindow` | `1000000` | CodeBuddy 默认模型 `deepseek-v4.1-flash` 的真实窗口（1M，`maxTokens` 384k）。报小了 dsh 会提前压缩历史，等于白丢上下文。Agent 通过 `usage_update` 上报过就以它为准（实测 ACP 会话报的是 `size: 300000`，那是它自己的有效窗口）。 |
+| `contextWindow` | `1000000` | CodeBuddy 默认模型 `deepseek-v4.1-flash` 的真实窗口（1M，`maxTokens` 384k）。报小了 dsh 会提前压缩历史，等于白丢上下文。Agent 通过 `usage_update` 上报过就以它为准（实测标准预设会报 `size: 300000`，切到 `ptc` 后报 `size: 1000000`）。 |
 | `startupTimeoutMs` / `idleTimeoutMs` | `60000` / `600000` | 握手超时 / 一轮对话内无事件多久算卡死。 |
-| `env` | `{}` | 在白名单环境之上**追加**变量，最后合并。要放回被挡掉的宿主变量（比如内网环境标识）就写这里。 |
+| `env` | `{ CODEBUDDY_MAIN_AGENT_ALLOW_UNOPTED: '1' }` | 在白名单环境之上**追加**变量，最后合并。默认这一条是让 Agent 预设对未声明的 ACP 宿主生效（见上一节）。要放回被挡掉的宿主变量就写这里——注意它整体覆盖默认值，不是追加。
 
 插件带一个设置页：设置 → **ACP Agents**，可以表单化管理路由、导入其他 ACP 客户端的 JSON 配置、按已保存命令发现模型。
 

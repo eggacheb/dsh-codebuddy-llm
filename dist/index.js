@@ -75,7 +75,7 @@ function defaultCodeBuddyProfile() {
 			"--model",
 			DEFAULT_CODEBUDDY_MODEL
 		],
-		env: {},
+		env: { CODEBUDDY_MAIN_AGENT_ALLOW_UNOPTED: "1" },
 		models: [],
 		discoverModels: true,
 		permission: "allow",

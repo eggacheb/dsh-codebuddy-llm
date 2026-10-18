@@ -2,6 +2,7 @@ import type { AgentRow } from '../src/client/service/agents.types.ts'
 import type { ConfigForm, ConfigFormSnapshot, JsonValue, SettingsPathOpView } from '../src/client/types/runtime.ts'
 import { describe, expect, it } from 'vitest'
 import { discoverAgentModels, removeAgent, saveAgent } from '../src/client/service/agents.ts'
+import { SETTINGS_NS } from '../src/shared/constants.ts'
 import {
   draftOf,
   emptyDraft,
@@ -141,7 +142,7 @@ describe('agent settings service', () => {
 
   it('discovers models through the llm-acp discovery', async () => {
     const llm = {
-      discoverModels: async (ns: string, request: { provider?: string }) => ns === 'llm-acp' && request.provider === 'codex'
+      discoverModels: async (ns: string, request: { provider?: string }) => ns === SETTINGS_NS && request.provider === 'codex'
         ? { ok: true as const, value: [{ id: 'gpt-5', name: 'GPT-5' }] }
         : { ok: false as const, error: { code: 'llm/model-discovery-rejected', message: `save ACP agent "${request.provider}" first` } },
     }

@@ -6,6 +6,7 @@ import { updateVolatile } from '@deepseek-ai/cosmokit'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
 import { describe, expect, it } from 'vitest'
 import * as plugin from '../src/index.ts'
+import { PLUGIN_ID, SETTINGS_NS } from '../src/shared/constants.ts'
 
 const MOCK = join(import.meta.dirname, 'fixtures', 'mock-agent.mjs')
 
@@ -21,15 +22,15 @@ describe('plugin wiring', () => {
     await new Promise(resolve => setTimeout(resolve, 50))
 
     expect(ctx.llm.listProviders()).toEqual([{ id: 'claude-acp', name: 'Mock Claude' }])
-    expect(ctx.llm.listConfigurableProviders()).toMatchObject([{ provider: 'claude-acp', settingsNs: 'dsh-tauri-acp', settingsPath: ['agents', 'claude-acp'] }])
+    expect(ctx.llm.listConfigurableProviders()).toMatchObject([{ provider: 'claude-acp', settingsNs: PLUGIN_ID, settingsPath: ['agents', 'claude-acp'] }])
     const models = await ctx.llm.listModels('claude-acp')
     expect(models.map(model => model.id)).toEqual(['default', 'mock-fast', 'mock-smart'])
     const info = await ctx.llm.resolveModelInfo('claude-acp', 'mock-fast')
     expect(info.reasoning?.defaultEffort).toBe('medium')
     expect(info.reasoning?.efforts.map(effort => effort.id)).toEqual(['low', 'medium', 'high'])
-    const discovered = await ctx.llm.discoverModels('llm-acp', { provider: 'claude-acp' })
+    const discovered = await ctx.llm.discoverModels(SETTINGS_NS, { provider: 'claude-acp' })
     expect(discovered.map(model => model.id)).toEqual(['mock-fast', 'mock-smart'])
-    await expect(ctx.llm.discoverModels('llm-acp', { provider: 'unsaved' })).rejects.toThrow(/save ACP agent "unsaved"/)
+    await expect(ctx.llm.discoverModels(SETTINGS_NS, { provider: 'unsaved' })).rejects.toThrow(/save ACP agent "unsaved"/)
 
     const chunks: StreamChunk[] = []
     for await (const chunk of ctx.llm.stream({
@@ -55,7 +56,7 @@ describe('plugin wiring', () => {
     formsCtx.provide('settings', { configure: (presentation: unknown) => (policies.push(presentation), () => {}) })
     const forms = formsCtx.plugin(plugin, profile)
     await new Promise(resolve => setTimeout(resolve, 50))
-    expect(formsCtx.llm.listConfigurableProviders()).toMatchObject([{ settingsNs: 'dsh-tauri-acp' }])
+    expect(formsCtx.llm.listConfigurableProviders()).toMatchObject([{ settingsNs: PLUGIN_ID }])
     expect(policies).toEqual([{ auto: false }])
     await forms.dispose()
 
@@ -71,8 +72,8 @@ describe('plugin wiring', () => {
     })
     const section = sectionCtx.plugin(plugin, profile)
     await new Promise(resolve => setTimeout(resolve, 50))
-    expect(installed).toEqual(['llm-acp'])
-    expect(sectionCtx.llm.listConfigurableProviders()).toMatchObject([{ settingsNs: 'llm-acp' }])
+    expect(installed).toEqual([SETTINGS_NS])
+    expect(sectionCtx.llm.listConfigurableProviders()).toMatchObject([{ settingsNs: SETTINGS_NS }])
     await section.dispose()
   })
 

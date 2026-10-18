@@ -1,16 +1,16 @@
 {
-  "name": "dsh-tauri-acp",
+  "name": "dsh-codebuddy-llm",
   "type": "module",
-  "version": "0.2.0",
-  "description": "DeepSeek Harness 桌面插件：以 ACP（Agent Client Protocol）方式把外部 Agent 注册为模型提供方。",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness 插件：以 ACP 方式把本机 CodeBuddy 注册为模型提供方（fork 自 dsh-tauri-acp）。",
   "license": "MIT",
-  "author": "Fleey",
-  "homepage": "https://github.com/Fleey/deepseek-harness-acp#readme",
+  "author": "eggacheb (fork of Fleey/dsh-tauri-acp)",
+  "homepage": "https://github.com/eggacheb/dsh-codebuddy-llm#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Fleey/deepseek-harness-acp.git"
+    "url": "git+https://github.com/eggacheb/dsh-codebuddy-llm.git"
   },
-  "bugs": "https://github.com/Fleey/deepseek-harness-acp/issues",
+  "bugs": "https://github.com/eggacheb/dsh-codebuddy-llm/issues",
   "keywords": [
     "dsh",
     "plugin",

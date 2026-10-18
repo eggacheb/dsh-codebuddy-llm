@@ -208,7 +208,7 @@ declare class AcpAdapter extends LlmAdapter {
 }
 //#endregion
 //#region src/index.d.ts
-declare const name = "dsh-tauri-acp";
+declare const name = "dsh-codebuddy-llm";
 declare const inject: string[];
 //#endregion
 export { AcpAdapter, type AcpAgentProfile, type AcpModelProfile, Config, type PermissionPolicy, type SystemPromptMode, apply, inject, name };

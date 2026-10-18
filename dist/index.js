@@ -2,20 +2,84 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import process from "node:process";
 import z from "@deepseek-ai/schemastery";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { LlmAdapter, LlmError, fileHandleText, offloadedImageText, requestImageHandleText, resolveRetryPolicy, textOnlyImageText } from "@deepseek-ai/dsh-llm";
 import { spawn } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 //#region src/shared/constants.ts
-const PLUGIN_ID = "dsh-tauri-acp";
+const PLUGIN_ID = "dsh-codebuddy-llm";
 /** Settings namespace the host installs (rc cores) and the namespace model discovery is offered under. */
-const SETTINGS_NS = "llm-acp";
+const SETTINGS_NS = "llm-codebuddy";
 //#endregion
 //#region src/host/config/constants.ts
 const DEFAULT_MODEL_ID = "default";
 const DEFAULT_CONTEXT_WINDOW = 2e5;
+/**
+* CodeBuddy 的默认模型。
+*
+* 和 `dsh-codebuddy`（子智能体版）保持一致：两边锁同一个模型，
+* 才不会出现「同一个 CodeBuddy，当模型时是 A、当子代理时是 B」。
+*/
+const DEFAULT_CODEBUDDY_MODEL = "deepseek-v4.1-flash";
+/**
+* 找一个**真正的 node.exe**。
+*
+* 绝对不能回落到 `process.execPath`：dsh 桌面端里那是 `DeepSeek Harness.exe`，
+* 拿它跑 JS 脚本的后果是「退出码 0、stdout 为空」，而且没有任何报错。
+* 这一条在 `dsh-codebuddy` 上已经踩过一次，别再来一次。
+*/
+function findNode() {
+	return [
+		join(process.env.LOCALAPPDATA ?? "", "pnpm", "node.exe"),
+		join(process.env.ProgramFiles ?? "C:\\Program Files", "nodejs", "node.exe"),
+		"C:\\Program Files\\nodejs\\node.exe"
+	].find((candidate) => candidate.length > 0 && existsSync(candidate));
+}
+/** CodeBuddy CLI 的入口脚本（JS，需要用 node 去跑）。 */
+function findCli() {
+	const local = process.env.LOCALAPPDATA ?? "";
+	return [join(local, "pnpm", "node_modules", "@tencent-ai", "codebuddy-code", "bin", "codebuddy"), join(local, "npm", "node_modules", "@tencent-ai", "codebuddy-code", "bin", "codebuddy")].find((candidate) => candidate.length > 0 && existsSync(candidate));
+}
+/**
+* 开箱即用的 CodeBuddy 路由：`agents` 为空时自动挂上。
+*
+* 为什么给默认值而不是要求手写配置：这个插件的用途就是「把本机 CodeBuddy 接成模型」，
+* 装完不能直接用就等于没装。显式配了 `agents` 之后默认值自动让位。
+*
+* `command` 用 node 而不是 `codebuddy`：bin 是无扩展名的 JS + shebang，
+* Windows 上直接 spawn 会失败；走 `node <js>` 才是可移植的。
+*/
+function defaultCodeBuddyProfile() {
+	const node = findNode();
+	const cli = findCli();
+	if (node === void 0 || cli === void 0) return void 0;
+	return {
+		displayName: "CodeBuddy",
+		command: node,
+		args: [
+			cli,
+			"--acp",
+			"--acp-transport",
+			"stdio",
+			"--permission-mode",
+			"dontAsk",
+			"--model",
+			DEFAULT_CODEBUDDY_MODEL
+		],
+		env: {},
+		models: [],
+		discoverModels: false,
+		permission: "allow",
+		imageInput: "auto",
+		systemPrompt: "drop",
+		showToolCalls: true,
+		contextWindow: DEFAULT_CONTEXT_WINDOW,
+		startupTimeoutMs: 6e4,
+		idleTimeoutMs: 6e5
+	};
+}
 //#endregion
 //#region src/host/config/schema.ts
 const DEFAULT_IDLE_TIMEOUT_MS = 6e5;
@@ -56,8 +120,14 @@ const Config = z.object({ agents: z.dict(AcpAgentProfile).default({}).volatile()
 /** Read the agents of a resolved config; a cell from another schemastery copy is read the same way. */
 function agentsOf(config) {
 	const agents = config?.agents;
-	if (agents === void 0) return {};
-	return typeof agents.get === "function" ? agents.get() : agents;
+	if (agents === void 0) return builtInDefault();
+	const resolved = typeof agents.get === "function" ? agents.get() : agents;
+	return Object.keys(resolved).length === 0 ? builtInDefault() : resolved;
+}
+/** 默认 CodeBuddy 路由；本机找不到 node 或 CLI 时给空（让配置页面去报错，而不是静默失败）。 */
+function builtInDefault() {
+	const profile = defaultCodeBuddyProfile();
+	return profile === void 0 ? {} : { codebuddy: profile };
 }
 //#endregion
 //#region node_modules/@agentclientprotocol/sdk/dist/schema/index.js
@@ -10124,6 +10194,18 @@ var PromptCapabilitiesCache = class {
 //#region src/host/service/acp-agent.ts
 const AUTH_REQUIRED_CODE = -32e3;
 const STDERR_TAIL_BYTES = 4096;
+/**
+* Whether spawning this command needs a shell.
+*
+* On Windows `spawn` with `shell: true` joins everything into one line for `cmd /c` **without
+* quoting**, so a command living under `C:\Program Files\...` is split at the first space and
+* dies as "not recognized". A real `.exe` therefore must never go through a shell. Only bare
+* names (`npx`, `claude`) and `.cmd`/`.bat` shims need one — Node refuses to run those directly.
+*/
+function needsShell(command, platform = process.platform) {
+	if (platform !== "win32") return false;
+	return !/\.(?:exe|com)$/i.test(command);
+}
 function selectOption(options, category) {
 	const option = options?.find((item) => item.category === category && item.type === "select");
 	if (option === void 0 || option.type !== "select") return void 0;
@@ -10389,7 +10471,7 @@ var AcpAgentProcess = class {
 				"pipe"
 			],
 			windowsHide: true,
-			shell: process.platform === "win32"
+			shell: needsShell(profile.command)
 		});
 		child.stderr?.setEncoding("utf8");
 		child.stderr?.on("data", (chunk) => {
@@ -10458,7 +10540,16 @@ var AcpAgentProcess = class {
 	}
 	stderrSuffix() {
 		const tail = this.stderrTail.trim();
-		return tail.length === 0 ? "" : `\n${tail}`;
+		return tail.length === 0 ? "" : `\n${tail}${this.portHint(tail)}`;
+	}
+	/**
+	* CodeBuddy 系 CLI 即使走 `--acp --acp-transport stdio`，也会先绑一个本地网关端口；
+	* 端口被占就直接退出，stderr 只留一行 EADDRINUSE。这台机器上同时装着 CodeBuddy /
+	* WorkBuddy 时必然撞上，光看「ACP connection closed」根本猜不到原因。
+	*/
+	portHint(tail) {
+		if (!tail.includes("EADDRINUSE")) return "";
+		return "\n  hint: another CodeBuddy-family process (CodeBuddy CLI, WorkBuddy, or a leaked run) already owns that gateway port. Quit it and retry, or keep a copy of the CLI for this plugin alone.";
 	}
 	startError(message, cause) {
 		return new LlmError(`${PLUGIN_ID}: ACP agent "${this.options.route}" ${message}${this.stderrSuffix()}`, "TRANSPORT", cause === void 0 ? void 0 : { cause });

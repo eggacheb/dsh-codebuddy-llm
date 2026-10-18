@@ -164,7 +164,11 @@ describe('acp adapter', () => {
 
   it('cancels the ACP turn when the request aborts', async () => {
     const controller = new AbortController()
-    setTimeout(() => controller.abort(), 150)
+    // 1500ms, not 150: a single round trip against the mock measures ~730ms here (spawn +
+    // ACP handshake + session/new), so a tighter budget cancels during startup and no text
+    // ever arrives. The mock emits a chunk every 30ms and only returns once it is cancelled,
+    // so this still proves text streams before the cancel lands.
+    setTimeout(() => controller.abort(), 1500)
     const result = await run(create(), request([user('slow please')], { signal: controller.signal }))
     expect(result.finish).toMatchObject({ type: 'finish', reason: { kind: 'aborted' } })
     expect(result.text.length).toBeGreaterThan(0)

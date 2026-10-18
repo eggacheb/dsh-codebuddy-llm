@@ -1,156 +1,125 @@
-# dsh-tauri-acp
+# dsh-codebuddy-llm
 
-DeepSeek Harness 桌面插件：用 ACP（[Agent Client Protocol](https://agentclientprotocol.com)）把外部 Agent（Codex、Claude Code、Gemini CLI 等）注册成 dsh 的模型提供方。在模型选择器里选中它，对话就会交给这个 Agent 处理。
+把本机的 **CodeBuddy** 注册成 DeepSeek Harness 的**模型提供方**：在模型选择器里选中它，对话就交给 CodeBuddy 处理。
 
-## 插件界面
+用 [ACP（Agent Client Protocol）](https://agentclientprotocol.com) 通信：插件拉起 `codebuddy --acp --acp-transport stdio` 子进程，再把 ACP 的流式事件翻译成 dsh 的 `StreamChunk`。
 
-<img width="1574" height="1432" alt="image" src="https://github.com/user-attachments/assets/55c8c3f8-987f-4574-8084-2ea43495e784" />
+Fork 自 [Fleey/deepseek-harness-acp](https://github.com/Fleey/deepseek-harness-acp)（MIT，见 `LICENSE`）。上游是通用的「ACP Agent → 模型」适配器；这个 fork 把默认路由、命令发现和默认参数都对准 CodeBuddy，装完即用。
 
-支持通过acp协议发现模型
+## 和 dsh-codebuddy 的区别
 
-<img width="1636" height="1576" alt="image" src="https://github.com/user-attachments/assets/a61e6342-7a74-40b7-b7b1-0a260c344d5b" />
+两个插件都驱动同一个 CodeBuddy，但**接入形态不同**，可以同时安装、各管一段：
 
-支持导入标准acp配置json进行导入
+| | `dsh-codebuddy`（子智能体版） | 本插件（模型版） |
+| --- | --- | --- |
+| 接入点 | `ctx.subagents.registerProvider()` | `ctx.llm.registerAdapter()` |
+| 在 dsh 里长什么样 | 一个工具 `subagent_codebuddy`，由主模型决定何时调用 | 模型提供方 `codebuddy`，直接在模型选择器里选 |
+| 谁在思考 | 主模型思考，CodeBuddy 只当一个被委派的执行者 | CodeBuddy 自己就是那个模型，主循环在它那边 |
+| 上下文 | 每次调用带一段任务描述 | 整个对话历史按 ACP 会话续传 |
+| 适合 | 让主模型保留决策权，把重活外包 | 想直接用 CodeBuddy 的模型与工具链答话 |
 
-<img width="1634" height="1364" alt="image" src="https://github.com/user-attachments/assets/967986ab-d5ee-4ed3-966d-5322e7f58d38" />
+一句话：**子智能体是「叫个人来干活」，模型版是「换个人来当大脑」。**
 
+## 开箱即用
+
+装好即可用，不需要先写配置。插件会自己找：
+
+- `node`：`%LOCALAPPDATA%\pnpm\node.exe` → `%ProgramFiles%\nodejs\node.exe` → `C:\Program Files\nodejs\node.exe`
+  **刻意不回落 `process.execPath`**：在 Electron 里那是桌面端自己的 exe，拿它跑 JS 的后果是「退出码 0、stdout 为空」，且没有任何报错。
+- CodeBuddy CLI：`%LOCALAPPDATA%\pnpm\node_modules\@tencent-ai\codebuddy-code\bin\codebuddy`，以及 npm 全局的同名路径。
+
+两者都找到时，自动挂上一条路由：
+
+```yaml
+codebuddy:
+  displayName: CodeBuddy
+  command: <node.exe>
+  args: [<cli>, --acp, --acp-transport, stdio, --permission-mode, dontAsk, --model, deepseek-v4.1-flash]
+  permission: allow
+  systemPrompt: drop
+```
+
+显式配了 `agents` 之后，默认路由自动让位。
+
+参数与 `dsh-codebuddy` 逐字一致——同一个 CodeBuddy 在两个插件里行为不同，排查起来是没有底的。
+
+### 为什么用 `node <cli>` 而不是 `codebuddy`
+
+`bin/codebuddy` 是没有扩展名的 JS + shebang，Windows 上直接 `spawn` 会失败。走 `node <js>` 才可移植。
+
+同理，spawn 只在**必须**时才开 `shell`：`.exe`/`.com` 直连，裸命令（`npx`、`claude`）和 `.cmd` 才交给 shell。Windows 上 `shell: true` 会把整条命令拼成一行给 `cmd /c` 且不加引号，`C:\Program Files\...` 会在第一个空格处被劈开。
 
 ## 工作方式
 
 - 每个配置项是一个 provider 路由，插件按需拉起该 Agent 子进程（stdio JSON-RPC），进程常驻复用。
-- 每个 dsh 会话对应一个 ACP 会话，后续轮次只发送新增的用户消息；历史对不上（切过模型、被压缩）时自动新建 ACP 会话，并把历史压平成 `<conversation_history>` 一次性带过去。Agent 收图时历史里的图片按原位置作为 `image` 块重发，不会被压成文本。
-- 模型列表来自 Agent 的 `configOptions`（`category: "model"`），兼容旧版 `models` + `session/set_model`；`default` 表示用 Agent 自己的默认模型。
-- 模型元数据来自 Agent 本身（需要时会先启动一次 Agent 探测，受 `discoverModels` 控制）：
-  - **推理等级**：Agent 的 `thought_level` 选项映射成 dsh 的推理等级，模型选择器里出现「推理等级」菜单；选中的等级经 `session/set_config_option` 设置，Agent 会话初始的等级作为默认等级上报（选择器里打勾的那一项，不再额外出现 dsh 自己的 Default）；Agent 对当前模型不提供的等级会被忽略并记日志。
-  - **图片输入**：输入类型按 ACP 协议问 Agent 本人——`initialize` 应答里的 `promptCapabilities`。dsh 解析元数据时若还没人跟这个路由握过手，插件会先做一次握手（只握手，不开会话、不发轮次）把能力问出来，答案按路由记在 `$DSH_HOME/cache/dsh-tauri-acp/prompt-capabilities.json`（连同启动命令的指纹，换了命令即作废），重启后首轮直接可用。声明 `promptCapabilities.image` 且 dsh 挂了附件服务时模型声明为 文本+图片，图片按 dsh 的请求尺寸（与 pi-ai 默认相同：≤4MP、≤1MB）重新编码后作为 ACP `image` 块发送。能力未知时不作声（dsh 把缺省读作「未知」并原样下发图片），而不是谎报纯文本——显式报纯文本会让 dsh 在进入插件之前就把图片换成文本占位。`imageInput` 可覆盖 Agent 漏报的能力。
-  - **上下文窗口**：优先用 `models[].contextWindow`，其次用 Agent 通过 `usage_update.size` 上报的大小（对话一轮后才知道，记在 `$DSH_HOME/cache/dsh-tauri-acp/context-windows.json`，重启后首轮直接可用），再次是模型 id、名称或描述里的 `1m` 标记（如 `claude-fable-5-1[1m]`、`(1M context)`，按 1000000 算），最后是 `contextWindow` 配置。ACP 在一轮对话前不提供窗口大小，所以从没跑过的模型首轮仍按配置值算。
-- `agent_message_chunk` 映射为正文，`agent_thought_chunk`、工具调用、计划映射为推理块；`usage` 按会话累计值做差分。
+- 每个 dsh 会话对应一个 ACP 会话，后续轮次只发送新增的用户消息；历史对不上（切过模型、被压缩）时自动新建 ACP 会话，并把历史压平成 `<conversation_history>` 一次性带过去。
+- `agent_message_chunk` 映射为正文，`agent_thought_chunk`、工具调用、计划映射为推理块；`usage` 按会话累计值做差分。工具调用渲染成 `▸ [edit] Edit config.json` 这样的行，`showToolCalls: false` 可关掉。
 - 工作目录取当前 dsh 会话的 workspace，取不到时回退到 `cwd` 配置或用户主目录。
-- Agent 的权限请求默认走 dsh 原生审批框（`ctx.approval`）。
 - 标题生成、压缩等辅助调用使用一次性 ACP 会话，不影响主会话。
 
-## 安装到桌面端
-
-插件是标准的 dsh bundle 包（`dsh.bundle.patch` → `cordis.patch.yml`）。先构建：
-
-```bash
-git clone https://github.com/Fleey/deepseek-harness-acp.git
-cd deepseek-harness-acp
-npm install && npm run build
-```
-
-然后在 `~/.dsh/profiles/desktop/package.json` 里加上依赖和 bundle，重启桌面端：
-
-```json
-{
-  "dependencies": {
-    "dsh-tauri-acp": "link:/path/to/deepseek-harness-acp"
-  },
-  "dsh": {
-    "profile": {
-      "bundles": ["dsh-tauri-acp"]
-    }
-  }
-}
-```
-
-然后在档案目录执行一次安装来建立链接。要用和桌面端相同的 pnpm（看 `node_modules/.modules.yaml` 里的 `packageManager`，当前是 11.8.0，需要 Node ≥ 22.13），否则 pnpm 会要求清空整个 `node_modules`：
-
-```bash
-cd ~/.dsh/profiles/desktop && npx -y pnpm@11.8.0 install --prefer-offline --config.minimum-release-age=0
-```
-
-link 模式下，插件会从本仓库的 `node_modules` 解析 `@deepseek-ai/dsh-llm`，和宿主不是同一个实例。所以适配器的失败一律以带内 `finish` 返回，不依赖 `instanceof LlmError`。改完代码执行 `npm run build`，再重启桌面端即可生效。
-
-也可以放进 dsh-desktop 仓库的 `packages/`，再加进 `dsh-tauri-bundle` 的依赖里随包内置。
-
-## 设置页
-
-插件带一个客户端设置页：设置 → **ACP Agents**（排在官方「模型」页之后），不用手写 YAML 就能添加、编辑、删除 Agent。
-
-- 表单字段：路由名、显示名、启动命令、参数（每行一个）、环境变量（每行一个 `KEY=VALUE`）、认证方法、权限策略、图片输入、模型列表。表单不展示的字段（`cwd`、`systemPrompt`、超时等）保存时原样保留。
-- **导入 JSON**：粘贴其他 ACP 客户端的配置一次导入多个 Agent，支持 Zed 的 `agent_servers`（也认 `agentServers`）、本插件自己的 `agents` 段，或直接的 `{ "名称": { "command", "args", "env" } }` 映射，其他键（如 `default_mcp_settings`）忽略。名称转成路由名（`CodeBuddy Code` → `codebuddy-code`，没有字母数字的名称用 `agent`，重名加 `-2`），原名作为显示名。先预览：每项标「新增」或「覆盖」，缺 `command`、`args` 不是字符串数组、`env` 不是字符串映射的条目列为跳过。每项前有复选框（默认全选，可一键全选/全不选），只导入勾选的。覆盖已有路由时只替换显示名、命令、参数和环境变量，权限、认证方法、模型等设置保留。勾选的条目一次原子写入。没带 `PATH` 的条目（如 `codebuddy`、`traecli`）用的是桌面端自己的 `PATH`，从 Dock 启动时可能找不到命令，必要时改成绝对路径或在 env 里补 `PATH`。
-- **发现模型**：按已保存的命令启动 Agent，读取它公布的模型并追加到列表（已有的行不动）。发现请求只能带路由名、带不了命令行，所以新 Agent 要先保存；编辑中未保存的命令修改也不会参与发现。发现结果不受 `models`、`discoverModels` 影响，总是 Agent 自己公布的列表。
-- 保存经 `ctx.configForms.get('dsh-tauri-acp')` 原子写入本插件条目的配置（带 revision 防覆盖），落到档案的 `cordis.patch.yml`。`agents` 字段声明为 `.volatile()`：DSH 0.2 的设置服务只把 volatile 字段做成可编辑表单（没有它设置页不会出现），并在原处提交修改、触发 `loader/volatile-update`，宿主据此重新注册路由，不重启插件，下一次请求即生效。改名会先删旧路由再写新路由。写入被拒（例如别处同时改过）时会重新读取并提示。
-- 由 bundle 层声明的 Agent 带 `YAML` 标记：可以在设置页覆盖字段，但不能改名或删除。
-- 设置页面向 DSH NEXT（0.2 核心）：设置段按档案条目 id 分段，即 `cordis.patch.yml` 插入的 `dsh-tauri-acp`；条目 id 改了的话设置页不会出现。宿主会关闭这个条目自动生成的通用表单，并把模型页的 provider 目录指向同一个段。0.1 核心（`settings.installSection`，段名 `llm-acp`）宿主仍可用，但没有这个设置页。
-- 档案不可写时只读展示。
+模型的上下文窗口与推理等级来自 Agent 本身的应答（`usage_update.size` / `thought_level`），按路由缓存在 `$DSH_HOME/cache/dsh-codebuddy-llm/`，重启后首轮即可用。
 
 ## 配置
 
-除了设置页，也可以在档案的 `cordis.patch.yml`（`~/.dsh/profiles/desktop/cordis.patch.yml`）里覆盖插件配置：
-
 ```yaml
-- id: dsh-tauri-acp
-  name: dsh-tauri-acp
+# ~/.dsh/profiles/desktop/cordis.patch.yml
+- id: dsh-codebuddy-llm
+  name: dsh-codebuddy-llm
   config:
     agents:
-      codex:
-        displayName: Codex (ACP)
-        command: /Users/you/.nvm/versions/node/v22.12.0/bin/codex-acp
-        authMethod: api-key
-        env:
-          OPENAI_API_KEY: sk-...
-      claude-code:
-        displayName: Claude Code (ACP)
-        command: /usr/local/bin/npx
-        args: [-y, '@agentclientprotocol/claude-agent-acp']
-        permission: ask
+      codebuddy:
+        displayName: CodeBuddy
+        command: C:/Users/you/AppData/Local/pnpm/node.exe
+        args:
+          - C:/Users/you/AppData/Local/pnpm/node_modules/@tencent-ai/codebuddy-code/bin/codebuddy
+          - --acp
+          - --acp-transport
+          - stdio
+          - --permission-mode
+          - dontAsk
+          - --model
+          - deepseek-v4.1-flash
+        permission: allow
 ```
 
-设置页保存的也是这一段配置。0.1 核心上同样的结构也可以写进 dsh 用户设置的 `llm-acp` 段，修改后下一次请求即生效。
-
-| 字段 | 默认值 | 说明 |
+| 字段 | 默认 | 说明 |
 | --- | --- | --- |
-| `displayName` | 路由名 | 模型选择器里显示的名字 |
-| `command` / `args` | 必填 / `[]` | 启动 ACP Agent 的命令 |
-| `env` | `{}` | 追加给子进程的环境变量（在继承的环境之上） |
-| `cwd` | 会话 workspace | 子进程目录，以及取不到会话 workspace 时的 ACP 会话目录 |
-| `authMethod` | 无 | 握手后调用 `authenticate` 的方法 id；出错信息会列出 Agent 支持的方法 |
-| `models` | `[]` | 手动声明模型（`id`、`name`、`description`、`contextWindow`）；声明后不再自动发现 |
-| `discoverModels` | `true` | 未声明模型时，启动 Agent 读取它公布的模型列表 |
-| `permission` | `ask` | `ask` 走 dsh 审批框（无审批服务时降级为 `read-only`）；`allow` 全部允许；`read-only` 只允许 read/search/think/fetch；`reject` 全部拒绝 |
-| `imageInput` | `auto` | `auto` 按 Agent 在 ACP 握手里公布的 `promptCapabilities.image` 判断；`force` 不管公布什么都开（Agent 漏报时用）；`off` 一律按文本占位。没挂附件服务时三者都是纯文本 |
-| `systemPrompt` | `drop` | `forward` 会把 dsh 系统提示词包在 `<system_instructions>` 里发给 Agent。dsh 提示词描述的是 dsh 自己的工具，一般不建议转发 |
-| `showToolCalls` | `true` | 把 Agent 的工具调用和计划显示在推理块里 |
-| `contextWindow` | `200000` | 上报给 dsh 的上下文窗口（用于压缩策略）；Agent 通过 `usage_update` 报告过大小、或模型带 `1m` 标记时以那个值为准 |
-| `startupTimeoutMs` | `60000` | 握手超时 |
-| `idleTimeoutMs` | `600000` | 流式输出空闲超时，`0` 关闭 |
+| `permission` | `allow` | CodeBuddy 自己执行工具，每问一次权限 dsh 就弹一次框，一个任务几十次调用没法用。可收紧成 `read-only`（只放行 read/search/fetch）或 `ask`（接 dsh 原生审批框）。 |
+| `systemPrompt` | `drop` | 不把 dsh 的 system prompt 塞给 CodeBuddy，它有自己的角色设定与工具规范。改成 `forward` 则转发。 |
+| `models` / `discoverModels` | `[]` / `false` | 模型列表。留空时只暴露一个 `default`，实际模型由 `args` 里的 `--model` 决定——**最省事也最稳**，因为发现模型需要为每个路由拉起一次 CLI。 |
+| `imageInput` | `auto` | 按 ACP 握手里 `promptCapabilities.image` 决定；`force` / `off` 可覆盖 Agent 的漏报。 |
+| `showToolCalls` | `true` | 把工具调用与计划渲染进推理块。 |
+| `contextWindow` | `200000` | 兜底值；Agent 上报过就以它为准。 |
+| `startupTimeoutMs` / `idleTimeoutMs` | `60000` / `600000` | 握手超时 / 一轮对话内无事件多久算卡死。 |
 
-## 冒烟测试
+插件带一个设置页：设置 → **ACP Agents**，可以表单化管理路由、导入其他 ACP 客户端的 JSON 配置、按已保存命令发现模型。
 
-```bash
-npx tsx scripts/smoke.mts "$(command -v codex-acp)"
-```
+## 已知限制
 
-只做握手和模型发现，不消耗额度。末尾加 `-- 你的问题` 会真正发一轮对话（会走 Agent 的计费），`ACP_MODEL`、`ACP_AUTH_METHOD` 环境变量可指定模型和认证方式。
-
-## 限制
-
-- Agent 用的是它自己的工具，dsh 的工具（含 MCP）不会传给它；插件不会产出 `tool-call`，每轮由 Agent 自己跑完。
-- 文件按文本占位发送（dsh 在进入任何适配器之前就把文件块换成了句柄文本，插件拿不到原始引用，所以 ACP 的 `resource`／`embeddedContext` 用不上）；Agent 不支持图片时图片也按文本占位。dsh 的内容块里没有音频，所以 ACP 的 `promptCapabilities.audio` 只做记录，没有可发的内容。
-- 推理等级列表取自 Agent 最近一次会话（默认模型下）提供的等级，换模型后等级集合变化的话，以 Agent 实际接受的为准。
-- 重试策略固定为不重试，避免 Agent 重复执行有副作用的操作。
-- 从 Finder/Dock 启动的桌面端拿不到 shell 的 `PATH`，`command` 建议写绝对路径。
-- 官方「模型」页里的 provider 编辑器是为 HTTP 接口设计的，ACP 路由请在「ACP Agents」页或 YAML 里配置；在模型页点开 ACP 路由的「编辑」时，官方编辑器里那行「其余字段在 cordis.patch.yml 中…(dsh-tauri-acp)」会被替换成指向「ACP Agents」页的提示。官方编辑器没有给插件留插槽，这是按 DOM 替换的：只改设置弹窗里以 `(dsh-tauri-acp)` 结尾的那一行，插件卸载时停止。
+- **网关端口冲突**：CodeBuddy 系 CLI 即使走 `--acp --acp-transport stdio`，启动时仍会绑一个本地网关端口（实测 `127.0.0.1:4408`）。同机已有 CodeBuddy / WorkBuddy 实例在跑时，这里会以 `EADDRINUSE` 直接退出，表现为 `initialize failed: ACP connection closed`。插件会把 stderr 尾部连同原因一起抛出，并附一条 hint。
+- **环境变量继承**：子进程拿到的是 `process.env` 加上路由的 `env`。如果 dsh 本身是从 CodeBuddy/WorkBuddy 的终端里启动的，`CODEBUDDY_*` 会被继承下去，可能把 CodeBuddy 推进网关模式。从桌面图标正常启动没有这个问题。
+- **link 安装下的 peer 依赖**：以 `link:` 方式装进 profile 时，插件会从本仓库的 `node_modules` 解析 `@deepseek-ai/dsh-llm`，和宿主不是同一个实例。所以适配器的失败一律以带内 `finish` 返回，不依赖 `instanceof LlmError`。
 
 ## 开发
 
 ```bash
-npm test
-npm run typecheck
-npm run build
+npm install
+npm run build      # tsdown → dist/index.js + dist/client.cjs
+npm run typecheck  # tsc --noEmit
+npm test           # vitest，57 项
 ```
 
-`npm run build`（`tsdown.config.ts`）同时产出宿主入口 `dist/index.js`（ESM，Node）和客户端入口 `dist/client.cjs`：一个只向 DSH web 的 `window.__ModuleLoader__` 注册工厂的 CJS 脚本，`react`、`react/jsx-runtime`、`@deepseek-ai/*` 由宿主模块表提供，不打进包里。
+装进本机 profile 做真机验证：
 
-- 客户端运行在 DSH 的 web 模块表里，只能 `require` 平台种子词（`react`、`react/jsx-runtime`、`@deepseek-ai/*`）和档案里作为条目加载的包。所以客户端只依赖 `react` 和 `@deepseek-ai/dsh-client-ui-primitives`，设置读写、文案、槽位都走 `ctx.configForms` / `ctx.locale` / `ctx.slots` / `ctx.remote.llm` 服务；不能用 `dsh-tauri` / `dsh-tauri-ui`（DSH NEXT 档案里没有它们，会报 `require("dsh-tauri") missed the module table`）。构建后可以检查：`grep -o 'require(\`[^\`]*\`)' dist/client.cjs`。
-- 样式自带（`src/client/styles/agents.ts`，挂成 `<style>`），只用宿主的 `--dsw-*` 设计变量：web 壳不给第三方 bundle 提供工具类 CSS。
-- `@deepseek-ai/dsh-client-ui-primitives` 不安装（它的 cordis peer 范围和这里的 alpha 版冲突，运行时也由宿主提供），用到的部分在 `types/dsh-client-ui-primitives.d.ts` 里按 0.2.0-rc.2 的类型声明。
-- 客户端测试覆盖设置段投影、表单校验、JSON 导入、写入操作和模型发现；`tests/client-section.test.tsx` 用 `react-dom/server` 渲染设置页，`tests/client-import-view.test.tsx` 在 happy-dom 里点选导入项（primitives 由 vitest 别名指向 `tests/stubs`），表单替身的方法依赖 `this`，和真实 `ConfigForm` 一样。
+```bash
+dsh plugin --profile <name> add D:/code/dsh-acp-llm
+dsh --profile <name> "说句话试试"
+```
 
-测试用 `tests/fixtures/mock-agent.mjs` 这个 mock ACP Agent 覆盖：模型发现与切换、增量会话复用、历史重建（含历史图片重发）、四种权限策略、取消、空响应、认证，推理等级、握手公布的输入能力（含落盘复用、换命令作废和 `imageInput` 覆盖）、上报的上下文窗口，以及在真实 cordis + `LlmRuntime` 下的注册、卸载和 volatile 配置热更新。
+改完代码执行 `npm run build`，再重启桌面端即可生效。
 
-## 许可证
+`scripts/smoke.mts` 可以脱离 dsh 直接验一个 ACP Agent：
 
-[MIT](LICENSE)
+```bash
+npx tsx scripts/smoke.mts <command> [args...] -- "提示词"
+```

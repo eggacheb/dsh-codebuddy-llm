@@ -79,6 +79,20 @@ const AUTH_REQUIRED_CODE = -32000
 
 const STDERR_TAIL_BYTES = 4096
 
+/**
+ * Whether spawning this command needs a shell.
+ *
+ * On Windows `spawn` with `shell: true` joins everything into one line for `cmd /c` **without
+ * quoting**, so a command living under `C:\Program Files\...` is split at the first space and
+ * dies as "not recognized". A real `.exe` therefore must never go through a shell. Only bare
+ * names (`npx`, `claude`) and `.cmd`/`.bat` shims need one — Node refuses to run those directly.
+ */
+export function needsShell(command: string, platform: NodeJS.Platform = process.platform): boolean {
+  if (platform !== 'win32')
+    return false
+  return !/\.(?:exe|com)$/i.test(command)
+}
+
 function selectOption(options: readonly SessionConfigOption[] | null | undefined, category: string): { id: string, current: string, available: AcpAdvertisedModel[] } | undefined {
   const option = options?.find(item => item.category === category && item.type === 'select')
   if (option === undefined || option.type !== 'select')
@@ -375,7 +389,7 @@ export class AcpAgentProcess {
       env: { ...process.env, ...profile.env },
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
-      shell: process.platform === 'win32',
+      shell: needsShell(profile.command),
     })
     child.stderr?.setEncoding('utf8')
     child.stderr?.on('data', (chunk: string) => {
@@ -458,7 +472,18 @@ export class AcpAgentProcess {
 
   private stderrSuffix(): string {
     const tail = this.stderrTail.trim()
-    return tail.length === 0 ? '' : `\n${tail}`
+    return tail.length === 0 ? '' : `\n${tail}${this.portHint(tail)}`
+  }
+
+  /**
+   * CodeBuddy 系 CLI 即使走 `--acp --acp-transport stdio`，也会先绑一个本地网关端口；
+   * 端口被占就直接退出，stderr 只留一行 EADDRINUSE。这台机器上同时装着 CodeBuddy /
+   * WorkBuddy 时必然撞上，光看「ACP connection closed」根本猜不到原因。
+   */
+  private portHint(tail: string): string {
+    if (!tail.includes('EADDRINUSE'))
+      return ''
+    return '\n  hint: another CodeBuddy-family process (CodeBuddy CLI, WorkBuddy, or a leaked run) already owns that gateway port. Quit it and retry, or keep a copy of the CLI for this plugin alone.'
   }
 
   private startError(message: string, cause?: unknown): LlmError {

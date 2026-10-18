@@ -8,6 +8,14 @@ export const DEFAULT_MODEL_ID = 'default'
 export const DEFAULT_CONTEXT_WINDOW = 200_000
 
 /**
+ * CodeBuddy 默认模型 `deepseek-v4.1-flash` 的真实窗口。
+ *
+ * 读自 CLI 的模型元数据：`contextWindow: 1,000,000` / `maxTokens: 384,000`。
+ * 窗口报小了 dsh 会提前触发压缩，把还能用的历史压掉。
+ */
+export const CODEBUDDY_CONTEXT_WINDOW = 1_000_000
+
+/**
  * CodeBuddy 的默认模型。
  *
  * 和 `dsh-codebuddy`（子智能体版）保持一致：两边锁同一个模型，
@@ -83,7 +91,10 @@ export function defaultCodeBuddyProfile(): AcpAgentProfile | undefined {
     // 混进别人的系统提示只会互相打架。需要时可在配置里改成 forward。
     systemPrompt: 'drop',
     showToolCalls: true,
-    contextWindow: DEFAULT_CONTEXT_WINDOW,
+    // `deepseek-v4.1-flash` 的真实窗口是 1M（maxTokens 384k，读自 CLI 的模型元数据）。
+    // 这里给 1M 而不是通用默认 200k：窗口报小了 dsh 会提前压缩历史，等于白白丢上下文。
+    // Agent 自己通过 usage_update 上报过之后，仍以它为准。
+    contextWindow: CODEBUDDY_CONTEXT_WINDOW,
     startupTimeoutMs: 60_000,
     idleTimeoutMs: 600_000,
   }

@@ -418,9 +418,10 @@ export class AcpAgentProcess {
     this.lastCwd = cwd
     const child = spawn(profile.command, profile.args, {
       cwd,
-      // 宿主的环境变量会把子进程拽进宿主的身份（尤其是 SERVER__PORT：两边抢同一个网关
-      // 端口，子进程一启动就 EADDRINUSE）。先摘干净，再叠用户按路由写的 env。
-      env: { ...childEnv(), ...profile.env },
+      // 子进程环境用白名单构造：宿主的 CLIENT_INFO_* 一旦整套进去，CLI 会切到宿主集成
+      // 认证从而读不到自己的登录态；SERVER__PORT 则会让父子抢同一个网关端口。
+      // 路由自己的 env 是最后合并的，要加什么都在那里加。
+      env: childEnv(process.env, profile.env),
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
       shell: needsShell(profile.command),

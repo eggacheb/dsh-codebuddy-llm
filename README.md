@@ -90,8 +90,9 @@ codebuddy:
 | `models` / `discoverModels` | `[]` / `true` | 默认让 CodeBuddy 自己报模型。它在 `session/new` 里给出 `availableModels`（实测 20 个：`fast-model`、`deepseek-v4.1-flash`、`glm-5.3`、`kimi-k3-1`、`deepseek-v4-pro`…）和一个 `thought_level` 选项（`low`/`high`/`max`/`enabled`，`enabled` 就是「用模型自带的默认档」），两者都只有在建过一次会话后才拿得到——所以关掉发现会同时失去「模型列表」和「推理等级」两行。代价是首次打开模型选择器要等一次冷启动（实测 6.4s）；超过 25s 还没答就放弃，选择器退回单个 default，不会变成第二次转圈。`models` 里写死列表可跳过这次发现。 |
 | `imageInput` | `auto` | 按 ACP 握手里 `promptCapabilities.image` 决定；`force` / `off` 可覆盖 Agent 的漏报。 |
 | `showToolCalls` | `true` | 把工具调用与计划渲染进推理块。 |
-| `contextWindow` | `200000` | 兜底值；Agent 上报过就以它为准。 |
+| `contextWindow` | `1000000` | CodeBuddy 默认模型 `deepseek-v4.1-flash` 的真实窗口（1M，`maxTokens` 384k）。报小了 dsh 会提前压缩历史，等于白丢上下文。Agent 通过 `usage_update` 上报过就以它为准（实测 ACP 会话报的是 `size: 300000`，那是它自己的有效窗口）。 |
 | `startupTimeoutMs` / `idleTimeoutMs` | `60000` / `600000` | 握手超时 / 一轮对话内无事件多久算卡死。 |
+| `env` | `{}` | 在白名单环境之上**追加**变量，最后合并。要放回被挡掉的宿主变量（比如内网环境标识）就写这里。 |
 
 插件带一个设置页：设置 → **ACP Agents**，可以表单化管理路由、导入其他 ACP 客户端的 JSON 配置、按已保存命令发现模型。
 
@@ -99,8 +100,8 @@ codebuddy:
 
 ## 已知限制
 
-- **网关端口**：CodeBuddy 系 CLI 即使走 `--acp --acp-transport stdio`，启动时仍会 bind 一个本地网关端口，读完 `SERVER__PORT` 就照它来。宿主（WorkBuddy / CodeBuddy 桌面端）正好用这两个变量发布自己的网关地址，于是继承下来就是**父子抢同一个端口**：子进程一启动就 `EADDRINUSE`，上层只看到 `initialize failed: ACP connection closed`。插件默认把 `SERVER__*` / `CODEBUDDY_*` / `CLAUDE_*` 从子进程环境里摘掉（见下一条），所以撞上它现在只可能是「别的 CodeBuddy 系进程真的占着」或「路由的 `env` 又把它写回去了」。
-- **环境变量**：子进程拿到的是**净化过**的 `process.env` 加上路由的 `env`。净化规则是按前缀摘：`CODEBUDDY_`（配置目录、宿主身份、会话 id、打包形态）、`CLAUDE_`、`SERVER__`（宿主网关端口）——留着它们会让子进程以为自己是宿主的一部分。凭据类例外，会照常传下去：`CODEBUDDY_API_KEY`、`CODEBUDDY_AUTH_TOKEN`、`CODEBUDDY_BASE_URL`、`CODEBUDDY_INTERNET_ENVIRONMENT`。真需要某条被摘掉的变量，在路由的 `env` 里写回去即可，它是后合并的。
+- **环境变量必须用白名单构造**，这一条是这个插件最容易踩的坑。CodeBuddy 的认证判定不只看「有没有凭据文件」，还看进程环境：宿主会向自身注入整套 IDE 客户端标识 `CLIENT_INFO_IDE_TYPE` / `_PLATFORM` / `_PLUGIN_NAME` / `_PRODUCT_NAME` / `_USER_AGENT_EXTENSION` / `_MACHINE_ID`。**六项单独存在都没事，同时存在就出事**——CLI 判定「我在宿主里跑」，切到宿主集成认证、转而向宿主索要 token，于是 `~/.codebuddy` 里的登录态根本不会被读取。表现很隐蔽：`initialize` 成功、`session/new` 成功（这两步不碰模型），一 `session/prompt` 就是 `stopReason: refusal`、`reply` 为空，CLI 日志里只有一行 `Request failed with status code 401`。所以子进程环境由 `child-env.ts` 只放行 Windows 基础变量 + `PATH` + 两个登录入口（`CODEBUDDY_API_KEY` / `CODEBUDDY_AUTH_TOKEN`）+ 非本机代理；`CLIENT_INFO_*`、`CODEBUDDY_*`、`CLAUDE_*`、`SERVER__*`、`DSH_*` 全部进不来。要加什么就在路由的 `env` 里写，它最后合并。（实测：白名单下 `deepseek-v4.1-flash` 一轮问答 22 秒返回「好的」。）
+- **网关端口**：CodeBuddy 系 CLI 即使走 `--acp --acp-transport stdio`，启动时仍会 bind 一个本地网关端口，并且照读宿主发布自己的 `SERVER__PORT` / `SERVER__HOST`。继承下来就是**父子抢同一个端口**，子进程一启动 `EADDRINUSE`，上层只看到 `initialize failed: ACP connection closed`。白名单天然挡掉这两个变量，CLI 自己 `listen(0)` 拿内核分配的空闲端口，无需插件挑端口。
 - **link 安装下的 peer 依赖**：以 `link:` 方式装进 profile 时，插件会从本仓库的 `node_modules` 解析 `@deepseek-ai/dsh-llm`，和宿主不是同一个实例。所以适配器的失败一律以带内 `finish` 返回，不依赖 `instanceof LlmError`。
 
 ## 开发
@@ -109,7 +110,7 @@ codebuddy:
 npm install
 npm run build      # tsdown → dist/index.js + dist/client.cjs
 npm run typecheck  # tsc --noEmit
-npm test           # vitest，65 项
+npm test           # vitest，69 项
 ```
 
 装进本机 profile 做真机验证：

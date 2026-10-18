@@ -158,11 +158,12 @@ declare class AcpAdapter extends LlmAdapter {
   private readonly profiles;
   private readonly contextWindows;
   private readonly capabilities;
+  private readonly traceFile;
   private readonly agents;
   private readonly bindings;
   private readonly turns;
   private readonly retryPolicy;
-  constructor(host: AdapterHost, profiles: () => ReadonlyMap<string, AcpAgentProfile>, contextWindows?: ContextWindows, capabilities?: PromptCapabilitiesCache);
+  constructor(host: AdapterHost, profiles: () => ReadonlyMap<string, AcpAgentProfile>, contextWindows?: ContextWindows, capabilities?: PromptCapabilitiesCache, traceFile?: string | undefined);
   sync(): void;
   dispose(): void;
   providerInfo(provider: string): LlmProviderInfo;
@@ -203,6 +204,14 @@ declare class AcpAdapter extends LlmAdapter {
   private run;
   private finish;
   private agent;
+  /**
+   * 等一个提问前的请求，但不等到底。
+   *
+   * Agent 收下请求却不回应时，界面上只会一直转圈、插件停在某个 await 上，既没有异常也没有
+   * 日志。这里给个上限，让它变成一条点名到阶段的错误；同时把这个子进程重启掉——一个请求
+   * 已经半开着的连接，后面的回合也不会再用得顺。
+   */
+  private guard;
   private cwdOf;
   private dropBindings;
 }

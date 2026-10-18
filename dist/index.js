@@ -2,7 +2,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import process from "node:process";
 import z from "@deepseek-ai/schemastery";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync } from "node:fs";
 import { LlmAdapter, LlmError, fileHandleText, offloadedImageText, requestImageHandleText, resolveRetryPolicy, textOnlyImageText } from "@deepseek-ai/dsh-llm";
 import { spawn } from "node:child_process";
 import { Readable, Writable } from "node:stream";
@@ -10950,6 +10950,97 @@ function fullPrompt(conversation, system, images) {
 	return preface.length === 0 ? blocks : [...preface, ...blocks];
 }
 //#endregion
+//#region src/host/service/turn-trace.ts
+/**
+* 一次模型回合的轨迹。
+*
+* 为什么要有它：ACP 这一侧最容易出的故障是「某个请求发出去就没回来」，此时界面上只会
+* 一直转圈，插件自己也停在某个 await 上 —— 既没有异常，也没有日志。所以这里按阶段
+* **逐条落盘**（而不是结束时汇总），卡住时最后一行的 `stage` 就是卡住的位置。
+*
+* 体积控制：一行一百多字节，一次回合三四行；超过上限就轮转成 `.1`。
+*/
+const MAX_BYTES = 256 * 1024;
+var TurnTrace = class {
+	lines = [];
+	flushed = 0;
+	textBlocks = 0;
+	textChars = 0;
+	reasoningBlocks = 0;
+	toolCalls = 0;
+	updates = 0;
+	startedAt = Date.now();
+	constructor(file) {
+		this.file = file;
+	}
+	start(fields) {
+		this.push({
+			t: "start",
+			...fields
+		});
+	}
+	/** 记下「正要等这一步」。它会立刻落盘，所以卡住时的最后一行就是卡住的位置。 */
+	stage(name) {
+		this.push({
+			t: "stage",
+			name,
+			ms: Date.now() - this.startedAt
+		});
+	}
+	/** 一条 ACP 通知的摘要：只累计数量与正文长度，正文留一小截方便认出在说什么。 */
+	update(kind, text) {
+		this.updates++;
+		switch (kind) {
+			case "agent_message_chunk":
+				if (text !== void 0 && text.length > 0) {
+					this.textBlocks++;
+					this.textChars += text.length;
+				}
+				break;
+			case "agent_thought_chunk":
+				this.reasoningBlocks++;
+				break;
+			case "tool_call":
+			case "tool_call_update":
+				this.toolCalls++;
+				break;
+			default: break;
+		}
+	}
+	end(fields) {
+		this.push({
+			t: "end",
+			stopReason: fields.stopReason,
+			ms: fields.ms,
+			textChunks: this.textBlocks,
+			textChars: this.textChars,
+			reasoningChunks: this.reasoningBlocks,
+			toolCalls: this.toolCalls,
+			updates: this.updates,
+			...fields.error === void 0 ? {} : { error: fields.error }
+		});
+	}
+	push(line) {
+		this.lines.push(`${JSON.stringify(line)}\n`);
+		this.flush();
+	}
+	flush() {
+		if (this.file === void 0 || this.lines.length === this.flushed) return;
+		const chunk = this.lines.slice(this.flushed).join("");
+		this.flushed = this.lines.length;
+		try {
+			rotate(this.file);
+			appendFileSync(this.file, chunk);
+		} catch {}
+	}
+};
+function rotate(file) {
+	try {
+		if (statSync(file).size < MAX_BYTES) return;
+		renameSync(file, `${file}.1`);
+	} catch {}
+}
+//#endregion
 //#region src/host/service/acp-adapter.ts
 const TEXT_ONLY = ["text"];
 const TEXT_AND_IMAGE = ["text", "image"];
@@ -10958,6 +11049,15 @@ const NO_RETRY = {
 	maxRetries: 0
 };
 const CANCEL_GRACE_MS = 5e3;
+/**
+* 提问前的配置类请求（选模型、选推理等级）本该在毫秒级返回。给它们一个上限，是为了让
+* 「Agent 收下请求却不回应」表现为一条明确的错误，而不是界面上一圈永远转下去。
+*/
+const STAGE_TIMEOUT_MS = 2e4;
+function promptHead(blocks) {
+	const text = blocks.map((block) => block.type === "text" ? block.text : "").join(" ").trim();
+	return text.length <= 60 ? text : `${text.slice(0, 60)}…`;
+}
 function spawnFacts(profile) {
 	return JSON.stringify([
 		profile.command,
@@ -10983,12 +11083,13 @@ var AcpAdapter = class extends LlmAdapter {
 	bindings = /* @__PURE__ */ new Map();
 	turns = /* @__PURE__ */ new Map();
 	retryPolicy = resolveRetryPolicy(NO_RETRY, `${PLUGIN_ID}: retryPolicy`);
-	constructor(host, profiles, contextWindows = new ContextWindows(), capabilities = new PromptCapabilitiesCache()) {
+	constructor(host, profiles, contextWindows = new ContextWindows(), capabilities = new PromptCapabilitiesCache(), traceFile = void 0) {
 		super();
 		this.host = host;
 		this.profiles = profiles;
 		this.contextWindows = contextWindows;
 		this.capabilities = capabilities;
+		this.traceFile = traceFile;
 	}
 	sync() {
 		const profiles = this.profiles();
@@ -11167,6 +11268,7 @@ var AcpAdapter = class extends LlmAdapter {
 	}
 	async *run(options) {
 		const route = options.provider;
+		const startedAt = Date.now();
 		const profile = this.profiles().get(route);
 		if (profile === void 0) throw new LlmError(`${PLUGIN_ID}: no ACP agent is configured for provider "${route}"`, "PROVIDER_NOT_FOUND");
 		const signal = options.signal;
@@ -11189,6 +11291,7 @@ var AcpAdapter = class extends LlmAdapter {
 		const conversation = conversationOf(options);
 		const system = profile.systemPrompt === "forward" ? systemText(options) : void 0;
 		const effort = options.reasoningEffort;
+		const trace = new TurnTrace(this.traceFile);
 		let images = {
 			read: /* @__PURE__ */ new Map(),
 			wanted: /* @__PURE__ */ new Map()
@@ -11200,8 +11303,10 @@ var AcpAdapter = class extends LlmAdapter {
 		if (prompt === void 0 || binding === void 0) {
 			reused = false;
 			if (binding !== void 0) agent.closeSession(binding.session);
-			const session = await agent.newSession(cwd, signal);
-			await agent.selectModel(session, options.model, signal);
+			trace.stage("session");
+			const session = await this.guard(route, "session", agent.newSession(cwd, signal), profile.startupTimeoutMs);
+			trace.stage("select-model");
+			await this.guard(route, "select-model", agent.selectModel(session, options.model, signal), STAGE_TIMEOUT_MS);
 			binding = {
 				session,
 				cwd,
@@ -11215,9 +11320,23 @@ var AcpAdapter = class extends LlmAdapter {
 			};
 			prompt = fullPrompt(conversation, system, images);
 		}
+		trace.start({
+			route,
+			model: options.model,
+			dshSession: dshSessionId,
+			ephemeral,
+			reused,
+			promptBlocks: prompt.length,
+			promptChars: prompt.reduce((sum, block) => sum + (block.type === "text" ? block.text.length : 0), 0),
+			head: promptHead(prompt)
+		});
 		const wantedEffort = effort ?? binding.session.efforts?.initial;
-		if (wantedEffort !== void 0) await agent.selectEffort(binding.session, wantedEffort, signal);
+		if (wantedEffort !== void 0) {
+			trace.stage("select-effort");
+			await this.guard(route, "select-effort", agent.selectEffort(binding.session, wantedEffort, signal), STAGE_TIMEOUT_MS);
+		}
 		if (images.wanted.size > 0 && agent.supportsImages) {
+			trace.stage("images");
 			images = {
 				read: await this.readImages(images.wanted, signal),
 				wanted: /* @__PURE__ */ new Map()
@@ -11260,8 +11379,10 @@ var AcpAdapter = class extends LlmAdapter {
 		signal?.addEventListener("abort", onAbort, { once: true });
 		armIdle();
 		const model = binding.model;
+		trace.stage("prompt");
 		agent.prompt(session, prompt, (update) => {
 			armIdle();
+			trace.update(update.sessionUpdate, update.sessionUpdate === "agent_message_chunk" && update.content.type === "text" ? update.content.text : void 0);
 			if (update.sessionUpdate === "usage_update" && update.size > 0) this.contextWindows.set(route, model, update.size);
 			else if (update.sessionUpdate === "config_option_update") applyConfigOptions(session, update.configOptions);
 			queue.push(...translator.push(update));
@@ -11281,6 +11402,7 @@ var AcpAdapter = class extends LlmAdapter {
 					wake = resolve;
 				});
 			}
+			trace.stage("drain");
 			yield* translator.close();
 			yield* this.finish(outcome, translator, binding, ephemeral, signal);
 		} finally {
@@ -11290,6 +11412,10 @@ var AcpAdapter = class extends LlmAdapter {
 			this.turns.delete(session.sessionId);
 			if (outcome === void 0) agent.cancel(session);
 			if (ephemeral) agent.closeSession(session);
+			trace.end({
+				stopReason: outcome?.kind === "response" ? outcome.response.stopReason : outcome?.kind,
+				ms: Date.now() - startedAt
+			});
 		}
 	}
 	*finish(outcome, translator, binding, ephemeral, signal) {
@@ -11395,6 +11521,30 @@ var AcpAdapter = class extends LlmAdapter {
 			facts: spawnFacts(profile)
 		});
 		return process;
+	}
+	/**
+	* 等一个提问前的请求，但不等到底。
+	*
+	* Agent 收下请求却不回应时，界面上只会一直转圈、插件停在某个 await 上，既没有异常也没有
+	* 日志。这里给个上限，让它变成一条点名到阶段的错误；同时把这个子进程重启掉——一个请求
+	* 已经半开着的连接，后面的回合也不会再用得顺。
+	*/
+	async guard(route, stage, action, ms) {
+		let timer;
+		const timeout = new Promise((_, reject) => {
+			timer = setTimeout(() => {
+				this.host.logger.warn(`${PLUGIN_ID}: ACP agent "${route}" accepted ${stage} but did not answer within ${ms}ms; restarting it`);
+				this.agents.get(route)?.process.restart();
+				this.dropBindings(route);
+				reject(new LlmError(`${PLUGIN_ID}: ACP agent "${route}" accepted ${stage} but did not answer within ${ms}ms`, "TRANSPORT"));
+			}, ms);
+		});
+		action.catch(() => {});
+		try {
+			return await Promise.race([action, timeout]);
+		} finally {
+			clearTimeout(timer);
+		}
 	}
 	cwdOf(dshSessionId, profile) {
 		return (dshSessionId === void 0 ? void 0 : this.host.agentOf(dshSessionId)?.session.header.cwd) ?? profile.cwd ?? homedir();
@@ -11513,7 +11663,7 @@ function apply(ctx, config) {
 			const attachments = ctx.get("attachments");
 			return typeof attachments?.readImageRequest !== "function" ? void 0 : (ref, signal) => attachments.readImageRequest(ref, requestImageTarget(ref, IMAGE_BUDGET), signal);
 		}
-	}, profiles, new ContextWindows(cacheFile("context-windows.json"), ctx.logger), new PromptCapabilitiesCache(cacheFile("prompt-capabilities.json"), ctx.logger));
+	}, profiles, new ContextWindows(cacheFile("context-windows.json"), ctx.logger), new PromptCapabilitiesCache(cacheFile("prompt-capabilities.json"), ctx.logger), cacheFile("turns.jsonl"));
 	ctx.effect(() => () => adapter.dispose(), `${PLUGIN_ID}: agents`);
 	ctx.llm.registerModelDiscovery(SETTINGS_NS, async (request, signal) => {
 		const route = request.provider ?? "";

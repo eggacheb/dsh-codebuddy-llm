@@ -125,6 +125,8 @@ export function apply(ctx: Context, config: Config): void {
     profiles,
     new ContextWindows(cacheFile('context-windows.json'), ctx.logger),
     new PromptCapabilitiesCache(cacheFile('prompt-capabilities.json'), ctx.logger),
+    // 每个回合留几行轨迹：卡住时最后一行就是卡住的位置。
+    cacheFile('turns.jsonl'),
   )
   ctx.effect(() => () => adapter.dispose(), `${PLUGIN_ID}: agents`)
 

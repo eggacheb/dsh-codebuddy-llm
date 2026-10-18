@@ -25,6 +25,7 @@ import { ContextWindows, inferContextWindow } from './context-windows.ts'
 import { decidePermission } from './permission.ts'
 import { PromptCapabilitiesCache } from './prompt-capabilities.ts'
 import { consumedIds, conversationOf, fullPrompt, incrementalPrompt, systemText } from './transcript.ts'
+import { TurnTrace } from './turn-trace.ts'
 
 interface Binding {
   session: AcpSession
@@ -47,6 +48,17 @@ type Outcome =
 const NO_RETRY = { mode: 'normal', maxRetries: 0 } as const
 
 const CANCEL_GRACE_MS = 5_000
+
+/**
+ * 提问前的配置类请求（选模型、选推理等级）本该在毫秒级返回。给它们一个上限，是为了让
+ * 「Agent 收下请求却不回应」表现为一条明确的错误，而不是界面上一圈永远转下去。
+ */
+const STAGE_TIMEOUT_MS = 20_000
+
+function promptHead(blocks: readonly AcpContentBlock[]): string {
+  const text = blocks.map(block => block.type === 'text' ? block.text : '').join(' ').trim()
+  return text.length <= 60 ? text : `${text.slice(0, 60)}…`
+}
 
 function spawnFacts(profile: AcpAgentProfile): string {
   return JSON.stringify([profile.command, profile.args, profile.env, profile.cwd ?? null, profile.authMethod ?? null])
@@ -74,6 +86,7 @@ export class AcpAdapter extends LlmAdapter {
     private readonly profiles: () => ReadonlyMap<string, AcpAgentProfile>,
     private readonly contextWindows: ContextWindows = new ContextWindows(),
     private readonly capabilities: PromptCapabilitiesCache = new PromptCapabilitiesCache(),
+    private readonly traceFile: string | undefined = undefined,
   ) {
     super()
   }
@@ -279,6 +292,7 @@ export class AcpAdapter extends LlmAdapter {
 
   private async* run(options: GenerateOptions): AsyncIterable<StreamChunk> {
     const route = options.provider
+    const startedAt = Date.now()
     const profile = this.profiles().get(route)
     if (profile === undefined)
       throw new LlmError(`${PLUGIN_ID}: no ACP agent is configured for provider "${route}"`, 'PROVIDER_NOT_FOUND')
@@ -297,6 +311,7 @@ export class AcpAdapter extends LlmAdapter {
     const system = profile.systemPrompt === 'forward' ? systemText(options) : undefined
 
     const effort = options.reasoningEffort as string | undefined
+    const trace = new TurnTrace(this.traceFile)
     let images: PromptImages = { read: new Map(), wanted: new Map() }
     let binding = ephemeral ? undefined : this.bindings.get(key)
     let reused = binding !== undefined && binding.session.generation === agent.generation && binding.cwd === cwd && binding.model === options.model
@@ -306,16 +321,31 @@ export class AcpAdapter extends LlmAdapter {
       reused = false
       if (binding !== undefined)
         agent.closeSession(binding.session)
-      const session = await agent.newSession(cwd, signal)
-      await agent.selectModel(session, options.model, signal)
+      trace.stage('session')
+      const session = await this.guard(route, 'session', agent.newSession(cwd, signal), profile.startupTimeoutMs)
+      trace.stage('select-model')
+      await this.guard(route, 'select-model', agent.selectModel(session, options.model, signal), STAGE_TIMEOUT_MS)
       binding = { session, cwd, model: options.model, consumed: [], usage: undefined }
       images = { read: new Map(), wanted: new Map() }
       prompt = fullPrompt(conversation, system, images)
     }
+    trace.start({
+      route,
+      model: options.model,
+      dshSession: dshSessionId,
+      ephemeral,
+      reused,
+      promptBlocks: prompt.length,
+      promptChars: prompt.reduce((sum, block) => sum + (block.type === 'text' ? block.text.length : 0), 0),
+      head: promptHead(prompt),
+    })
     const wantedEffort = effort ?? binding.session.efforts?.initial
-    if (wantedEffort !== undefined)
-      await agent.selectEffort(binding.session, wantedEffort, signal)
+    if (wantedEffort !== undefined) {
+      trace.stage('select-effort')
+      await this.guard(route, 'select-effort', agent.selectEffort(binding.session, wantedEffort, signal), STAGE_TIMEOUT_MS)
+    }
     if (images.wanted.size > 0 && agent.supportsImages) {
+      trace.stage('images')
       images = { read: await this.readImages(images.wanted, signal), wanted: new Map() }
       prompt = reused ? incrementalPrompt(conversation, consumedBefore, route, images) ?? prompt : fullPrompt(conversation, system, images)
     }
@@ -357,8 +387,10 @@ export class AcpAdapter extends LlmAdapter {
     signal?.addEventListener('abort', onAbort, { once: true })
     armIdle()
     const model = binding.model
+    trace.stage('prompt')
     agent.prompt(session, prompt, (update) => {
       armIdle()
+      trace.update(update.sessionUpdate, update.sessionUpdate === 'agent_message_chunk' && update.content.type === 'text' ? update.content.text : undefined)
       if (update.sessionUpdate === 'usage_update' && update.size > 0)
         this.contextWindows.set(route, model, update.size)
       else if (update.sessionUpdate === 'config_option_update')
@@ -380,6 +412,7 @@ export class AcpAdapter extends LlmAdapter {
           wake = resolve
         })
       }
+      trace.stage('drain')
       yield* translator.close()
       yield* this.finish(outcome, translator, binding, ephemeral, signal)
     }
@@ -392,6 +425,10 @@ export class AcpAdapter extends LlmAdapter {
         agent.cancel(session)
       if (ephemeral)
         agent.closeSession(session)
+      trace.end({
+        stopReason: outcome?.kind === 'response' ? outcome.response.stopReason : outcome?.kind,
+        ms: Date.now() - startedAt,
+      })
     }
   }
 
@@ -457,6 +494,33 @@ export class AcpAdapter extends LlmAdapter {
     })
     this.agents.set(route, { process, facts: spawnFacts(profile) })
     return process
+  }
+
+  /**
+   * 等一个提问前的请求，但不等到底。
+   *
+   * Agent 收下请求却不回应时，界面上只会一直转圈、插件停在某个 await 上，既没有异常也没有
+   * 日志。这里给个上限，让它变成一条点名到阶段的错误；同时把这个子进程重启掉——一个请求
+   * 已经半开着的连接，后面的回合也不会再用得顺。
+   */
+  private async guard<T>(route: string, stage: string, action: Promise<T>, ms: number): Promise<T> {
+    let timer: NodeJS.Timeout | undefined
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        this.host.logger.warn(`${PLUGIN_ID}: ACP agent "${route}" accepted ${stage} but did not answer within ${ms}ms; restarting it`)
+        this.agents.get(route)?.process.restart()
+        this.dropBindings(route)
+        reject(new LlmError(`${PLUGIN_ID}: ACP agent "${route}" accepted ${stage} but did not answer within ${ms}ms`, 'TRANSPORT'))
+      }, ms)
+    })
+    // 竞速输了之后这个 promise 仍可能 reject，不能让它变成未处理的 rejection。
+    action.catch(() => {})
+    try {
+      return await Promise.race([action, timeout])
+    }
+    finally {
+      clearTimeout(timer)
+    }
   }
 
   private cwdOf(dshSessionId: string | undefined, profile: AcpAgentProfile): string {

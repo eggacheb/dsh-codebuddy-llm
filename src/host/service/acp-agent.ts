@@ -162,6 +162,8 @@ export class AcpAgentProcess {
   private disposed = false
   private stderrTail = ''
   private readonly listeners = new Map<string, (update: SessionUpdate) => void>()
+  private liveCwd: string | undefined
+  private lastCwd: string | undefined
   private advertised: AcpAdvertisedModel[] | undefined
   private efforts: AcpSessionEfforts | undefined
   private discovering: Promise<readonly AcpAdvertisedModel[]> | undefined
@@ -201,7 +203,7 @@ export class AcpAgentProcess {
   }
 
   async newSession(cwd: string, signal?: AbortSignal): Promise<AcpSession> {
-    const live = await this.ensure(signal)
+    const live = await this.ensure(signal, cwd)
     let response: NewSessionResponse
     try {
       response = await this.withAbort(live.connection.agent.request(methods.agent.session.new, { cwd, mcpServers: [] }), signal)
@@ -327,7 +329,8 @@ export class AcpAgentProcess {
     if (this.advertised !== undefined)
       return this.advertised
     // Catalog reads resolve every model at once; they share one probe session.
-    this.discovering ??= this.newSession(cwd).then((session) => {
+    // 用这个进程已经在的目录：设置页取模型列表不该把正在对话的会话按到别的目录去。
+    this.discovering ??= this.newSession(this.liveCwd ?? this.lastCwd ?? cwd).then((session) => {
       this.closeSession(session)
       this.advertised ??= session.models.available
       return this.advertised
@@ -352,6 +355,7 @@ export class AcpAgentProcess {
   private teardown(): void {
     const live = this.live
     this.live = undefined
+    this.liveCwd = undefined
     this.starting = undefined
     this.listeners.clear()
     if (live === undefined)
@@ -369,23 +373,37 @@ export class AcpAgentProcess {
     return live
   }
 
-  private ensure(signal?: AbortSignal): Promise<LiveAgent> {
+  /**
+   * @param cwd 这次要用的工作目录（dsh 会话的 workspace）。子进程的 shell 必须和 ACP
+   * 会话报的目录一致：CodeBuddy 的 Bash 工具跟随进程 cwd，两者不一致时它会发现
+   * 「runtime context 说 A、我的 shell 在 B」，然后停下来反问用户。
+   */
+  private ensure(signal?: AbortSignal, cwd?: string): Promise<LiveAgent> {
     if (this.disposed)
       return Promise.reject(new LlmError(`${PLUGIN_ID}: ACP agent "${this.options.route}" was disposed`, 'TRANSPORT'))
-    if (this.live !== undefined)
-      return Promise.resolve(this.live)
-    this.starting ??= this.start().finally(() => {
+    if (this.live !== undefined) {
+      if (cwd === undefined || this.liveCwd === undefined || cwd === this.liveCwd)
+        return Promise.resolve(this.live)
+      // 一个路由只能有一个进程（CodeBuddy 系 CLI 会抢同一个网关端口），所以换工作区
+      // 只能重启。已经聊过的会话在自己那一侧仍有上下文，这里丢的只是 shell 的落脚点。
+      this.options.logger.info(`${PLUGIN_ID}: ACP agent "${this.options.route}" restarts for working directory "${cwd}"`)
+      this.restart()
+    }
+    this.starting ??= this.start(cwd).finally(() => {
       this.starting = undefined
     })
     return this.withAbort(this.starting, signal)
   }
 
-  private async start(): Promise<LiveAgent> {
+  private async start(cwdHint?: string): Promise<LiveAgent> {
     const profile = this.options.profile()
     const generation = ++this.generationCounter
     this.stderrTail = ''
+    // 显式配的 cwd 优先；其次这次会话的工作区；再次上次用过的（同一窗口的后续回合）。
+    const cwd = profile.cwd ?? cwdHint ?? this.lastCwd ?? homedir()
+    this.lastCwd = cwd
     const child = spawn(profile.command, profile.args, {
-      cwd: profile.cwd ?? homedir(),
+      cwd,
       env: { ...process.env, ...profile.env },
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
@@ -466,6 +484,7 @@ export class AcpAgentProcess {
       }
     })
     this.live = live
+    this.liveCwd = cwd
     this.options.onCapabilities?.(promptCapabilitiesOf(init.agentCapabilities?.promptCapabilities))
     return live
   }

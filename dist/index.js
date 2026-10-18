@@ -10282,6 +10282,8 @@ var AcpAgentProcess = class {
 	disposed = false;
 	stderrTail = "";
 	listeners = /* @__PURE__ */ new Map();
+	liveCwd;
+	lastCwd;
 	advertised;
 	efforts;
 	discovering;
@@ -10314,7 +10316,7 @@ var AcpAgentProcess = class {
 		return this.efforts;
 	}
 	async newSession(cwd, signal) {
-		const live = await this.ensure(signal);
+		const live = await this.ensure(signal, cwd);
 		let response;
 		try {
 			response = await this.withAbort(live.connection.agent.request(methods.agent.session.new, {
@@ -10413,7 +10415,7 @@ var AcpAgentProcess = class {
 	}
 	async discoverModels(cwd, signal) {
 		if (this.advertised !== void 0) return this.advertised;
-		this.discovering ??= this.newSession(cwd).then((session) => {
+		this.discovering ??= this.newSession(this.liveCwd ?? this.lastCwd ?? cwd).then((session) => {
 			this.closeSession(session);
 			this.advertised ??= session.models.available;
 			return this.advertised;
@@ -10435,6 +10437,7 @@ var AcpAgentProcess = class {
 	teardown() {
 		const live = this.live;
 		this.live = void 0;
+		this.liveCwd = void 0;
 		this.starting = void 0;
 		this.listeners.clear();
 		if (live === void 0) return;
@@ -10447,20 +10450,31 @@ var AcpAgentProcess = class {
 		if (live === void 0 || live.generation !== generation) throw new LlmError(`${PLUGIN_ID}: ACP agent "${this.options.route}" restarted during the request`, "TRANSPORT");
 		return live;
 	}
-	ensure(signal) {
+	/**
+	* @param cwd 这次要用的工作目录（dsh 会话的 workspace）。子进程的 shell 必须和 ACP
+	* 会话报的目录一致：CodeBuddy 的 Bash 工具跟随进程 cwd，两者不一致时它会发现
+	* 「runtime context 说 A、我的 shell 在 B」，然后停下来反问用户。
+	*/
+	ensure(signal, cwd) {
 		if (this.disposed) return Promise.reject(new LlmError(`${PLUGIN_ID}: ACP agent "${this.options.route}" was disposed`, "TRANSPORT"));
-		if (this.live !== void 0) return Promise.resolve(this.live);
-		this.starting ??= this.start().finally(() => {
+		if (this.live !== void 0) {
+			if (cwd === void 0 || this.liveCwd === void 0 || cwd === this.liveCwd) return Promise.resolve(this.live);
+			this.options.logger.info(`${PLUGIN_ID}: ACP agent "${this.options.route}" restarts for working directory "${cwd}"`);
+			this.restart();
+		}
+		this.starting ??= this.start(cwd).finally(() => {
 			this.starting = void 0;
 		});
 		return this.withAbort(this.starting, signal);
 	}
-	async start() {
+	async start(cwdHint) {
 		const profile = this.options.profile();
 		const generation = ++this.generationCounter;
 		this.stderrTail = "";
+		const cwd = profile.cwd ?? cwdHint ?? this.lastCwd ?? homedir();
+		this.lastCwd = cwd;
 		const child = spawn(profile.command, profile.args, {
-			cwd: profile.cwd ?? homedir(),
+			cwd,
 			env: {
 				...process.env,
 				...profile.env
@@ -10535,6 +10549,7 @@ var AcpAgentProcess = class {
 			}
 		});
 		this.live = live;
+		this.liveCwd = cwd;
 		this.options.onCapabilities?.(promptCapabilitiesOf(init.agentCapabilities?.promptCapabilities));
 		return live;
 	}

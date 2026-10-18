@@ -188,6 +188,28 @@ describe('acp adapter', () => {
     expect((await run(broken, request([user('hi')]))).finish).toMatchObject({ reason: { kind: 'error', failure: { code: 'TRANSPORT' } } })
   })
 
+  it('puts the agent shell in the session workspace', async () => {
+    const result = await run(create(), request([user('pwd')]))
+    // CodeBuddy 的 Bash 工具跟随进程 cwd。进程 cwd 与会话 cwd 不一致时，它会发现
+    // 「runtime context 说 A、我的 shell 在 B」，然后停下来反问用户，而不是干活。
+    expect(result.text.toLowerCase()).toBe(`shell:${WORKSPACE}|session:${WORKSPACE}`.toLowerCase())
+  })
+
+  it('restarts the agent when the session moves to another workspace', async () => {
+    const other = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-acp-')))
+    let cwd = WORKSPACE
+    const moving = create(profile(), {
+      logger: silentLogger,
+      agentOf: () => ({ session: { header: { cwd } } }),
+      approve: undefined,
+      readImage: undefined,
+    })
+    expect((await run(moving, request([user('pwd')]))).text.toLowerCase()).toBe(`shell:${WORKSPACE}|session:${WORKSPACE}`.toLowerCase())
+    // 一个路由只能有一个进程（CodeBuddy 会抢同一个网关端口），所以换工作区只能重启。
+    cwd = other
+    expect((await run(moving, request([user('pwd')]))).text.toLowerCase()).toBe(`shell:${other}|session:${other}`.toLowerCase())
+  })
+
   it('uses fresh ephemeral sessions for auxiliary calls', async () => {
     const adapter = create()
     const first = user('hello')

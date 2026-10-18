@@ -72,6 +72,12 @@ async function prompt(params, client) {
   if (text.includes('silent'))
     return { stopReason: 'end_turn' }
 
+  // 子进程的 shell 落在哪，和 ACP 会话报的目录是不是同一个。
+  if (text.includes('pwd')) {
+    await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `shell:${process.cwd()}|session:${session.cwd}` } })
+    return { stopReason: 'end_turn', usage: { ...session.usage } }
+  }
+
   if (text.includes('probe')) {
     await update({ sessionUpdate: 'usage_update', used: 42, size: 123456 })
     const seen = images.map(image => `${image.mimeType}:${image.data}`).join(',')

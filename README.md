@@ -6,6 +6,8 @@
 
 Fork 自 [Fleey/deepseek-harness-acp](https://github.com/Fleey/deepseek-harness-acp)（MIT，见 `LICENSE`）。上游是通用的「ACP Agent → 模型」适配器；这个 fork 把默认路由、命令发现和默认参数都对准 CodeBuddy，装完即用。
 
+> **接手开发先读 [`HANDOFF.md`](./HANDOFF.md)**：三个决定性结论（环境白名单、Agent 预设有门禁、分类数据为什么到不了前端）、未验证项、以及别再重试的坑。
+
 ## 和 dsh-codebuddy 的区别
 
 两个插件都驱动同一个 CodeBuddy，但**接入形态不同**，可以同时安装、各管一段：

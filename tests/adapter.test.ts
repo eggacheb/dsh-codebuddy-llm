@@ -164,11 +164,12 @@ describe('acp adapter', () => {
 
   it('cancels the ACP turn when the request aborts', async () => {
     const controller = new AbortController()
-    // 1500ms, not 150: a single round trip against the mock measures ~730ms here (spawn +
-    // ACP handshake + session/new), so a tighter budget cancels during startup and no text
-    // ever arrives. The mock emits a chunk every 30ms and only returns once it is cancelled,
-    // so this still proves text streams before the cancel lands.
-    setTimeout(() => controller.abort(), 1500)
+    // 一次 round trip 约 730ms（spawn + ACP 握手 + session/new）。全量跑时九个
+    // 测试文件并发、各自 spawn 一个 node 子进程，这段会涨到 1.5s 以上，1500ms 的
+    // 预算就会在「第一个 chunk 到来之前」取消，text 为空而失败。放到 4000ms：
+    // mock 每 30ms 发一个 chunk 且只在取消时返回，所以这个预算仍然只证明
+    // 「取消前有过流式输出」，不会因为 agent 正常结束而蒙混过关。
+    setTimeout(() => controller.abort(), 4000)
     const result = await run(create(), request([user('slow please')], { signal: controller.signal }))
     expect(result.finish).toMatchObject({ type: 'finish', reason: { kind: 'aborted' } })
     expect(result.text.length).toBeGreaterThan(0)

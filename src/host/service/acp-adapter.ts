@@ -33,6 +33,12 @@ interface Binding {
   model: string
   consumed: string[]
   usage: Usage | undefined
+  /**
+   * CodeBuddy 自己报的上下文构成（`systemPrompt` / `tools` / `conversation` / `mcp` / `skills`）
+   * 与它认定的有效窗口。ACP 的 `TokenUsage` 没有分类维度，只能在这里单独留着。
+   */
+  breakdown?: Record<string, number>
+  contextSize?: number
 }
 
 const TEXT_ONLY: readonly ModelModality[] = ['text']
@@ -73,6 +79,54 @@ function failureOf(error: unknown): { code: string, message: string } {
   if (typeof known?.code === 'string' && typeof known.message === 'string')
     return failure(known.code, known.message)
   return failure('TRANSPORT', error instanceof Error ? error.message : String(error))
+}
+
+/** 12835 → "12.8K"，1000000 → "1.0M"。 */
+function formatTokens(count: number): string {
+  if (count >= 1_000_000)
+    return `${(count / 1_000_000).toFixed(1)}M`
+  if (count >= 1_000)
+    return `${(count / 1_000).toFixed(1)}K`
+  return String(count)
+}
+
+const CONTEXT_CATEGORIES: ReadonlyArray<readonly [string, string]> = [
+  ['systemPrompt', '提示词'],
+  ['tools', '工具'],
+  ['conversation', '对话'],
+  ['mcp', 'MCP'],
+  ['skills', '技能'],
+]
+
+/**
+ * 一轮结束时补一行「上下文构成」。
+ *
+ * CodeBuddy 在 `usage_update._meta["codebuddy.ai/usageByCategory"]` 里给了分类明细，
+ * 但 ACP 的 `TokenUsage` 只有 input / output / cache 三类，分类在适配层就被丢掉了。
+ * dsh 自己的上下文面板按字符估算 dsh 发出去的那部分，看不到 CodeBuddy 进程里的工具
+ * 定义、系统提示词和技能——对这条路由会严重偏低。
+ *
+ * 所以把每轮的分类压成一行推理文本：数字是 CodeBuddy 亲口报的，不是估算。放在推理
+ * 块里不打断正文，展开「思考过程」就能看到；客户端要画圆环也可以直接解析这一行。
+ */
+export function* contextReport(binding: Binding, index: number): Iterable<StreamChunk> {
+  const byCategory = binding.breakdown
+  if (byCategory === undefined)
+    return
+  const parts = CONTEXT_CATEGORIES
+    .map(([key, label]) => [label, byCategory[key] ?? 0] as const)
+    .filter(([, value]) => value > 0)
+  const total = parts.reduce((sum, [, value]) => sum + value, 0)
+  if (total === 0)
+    return
+  const size = binding.contextSize
+  const share = size === undefined || size <= 0 ? '' : `（${(total / size * 100).toFixed(1)}%）`
+  const window = size === undefined ? '' : ` / ${formatTokens(size)}`
+  const body = parts.map(([label, value]) => `${label} ${formatTokens(value)}`).join(' · ')
+  const text = `上下文 ${formatTokens(total)}${window}${share}｜${body}`
+  yield { type: 'block-start', index, blockType: 'reasoning' }
+  yield { type: 'reasoning-delta', index, text }
+  yield { type: 'block-end', index, block: { type: 'reasoning', text } }
 }
 
 export class AcpAdapter extends LlmAdapter {
@@ -391,8 +445,16 @@ export class AcpAdapter extends LlmAdapter {
     agent.prompt(session, prompt, (update) => {
       armIdle()
       trace.update(update.sessionUpdate, update.sessionUpdate === 'agent_message_chunk' && update.content.type === 'text' ? update.content.text : undefined)
-      if (update.sessionUpdate === 'usage_update' && update.size > 0)
+      if (update.sessionUpdate === 'usage_update' && update.size > 0) {
         this.contextWindows.set(route, model, update.size)
+        binding.contextSize = update.size
+        const meta = Reflect.get(update, '_meta')
+        const byCategory = typeof meta === 'object' && meta !== null
+          ? Reflect.get(meta, 'codebuddy.ai/usageByCategory')
+          : undefined
+        if (typeof byCategory === 'object' && byCategory !== null)
+          binding.breakdown = byCategory as Record<string, number>
+      }
       else if (update.sessionUpdate === 'config_option_update')
         applyConfigOptions(session, update.configOptions)
       queue.push(...translator.push(update))
@@ -455,9 +517,12 @@ export class AcpAdapter extends LlmAdapter {
     }
     switch (response.stopReason) {
       case 'end_turn':
-        yield translator.emittedBlocks === 0
-          ? { type: 'finish', reason: { kind: 'error', failure: failure('EMPTY_RESPONSE', 'ACP agent ended the turn without any content') } }
-          : { type: 'finish', reason: { kind: 'stop' } }
+        if (translator.emittedBlocks === 0) {
+          yield { type: 'finish', reason: { kind: 'error', failure: failure('EMPTY_RESPONSE', 'ACP agent ended the turn without any content') } }
+          return
+        }
+        yield* contextReport(binding, translator.emittedBlocks)
+        yield { type: 'finish', reason: { kind: 'stop' } }
         return
       case 'max_tokens':
         yield { type: 'finish', reason: { kind: 'max-tokens' } }

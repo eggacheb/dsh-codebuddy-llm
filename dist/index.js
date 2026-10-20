@@ -11238,6 +11238,60 @@ function failureOf(error) {
 	if (typeof known?.code === "string" && typeof known.message === "string") return failure(known.code, known.message);
 	return failure("TRANSPORT", error instanceof Error ? error.message : String(error));
 }
+/** 12835 → "12.8K"，1000000 → "1.0M"。 */
+function formatTokens(count) {
+	if (count >= 1e6) return `${(count / 1e6).toFixed(1)}M`;
+	if (count >= 1e3) return `${(count / 1e3).toFixed(1)}K`;
+	return String(count);
+}
+const CONTEXT_CATEGORIES = [
+	["systemPrompt", "提示词"],
+	["tools", "工具"],
+	["conversation", "对话"],
+	["mcp", "MCP"],
+	["skills", "技能"]
+];
+/**
+* 一轮结束时补一行「上下文构成」。
+*
+* CodeBuddy 在 `usage_update._meta["codebuddy.ai/usageByCategory"]` 里给了分类明细，
+* 但 ACP 的 `TokenUsage` 只有 input / output / cache 三类，分类在适配层就被丢掉了。
+* dsh 自己的上下文面板按字符估算 dsh 发出去的那部分，看不到 CodeBuddy 进程里的工具
+* 定义、系统提示词和技能——对这条路由会严重偏低。
+*
+* 所以把每轮的分类压成一行推理文本：数字是 CodeBuddy 亲口报的，不是估算。放在推理
+* 块里不打断正文，展开「思考过程」就能看到；客户端要画圆环也可以直接解析这一行。
+*/
+function* contextReport(binding, index) {
+	const byCategory = binding.breakdown;
+	if (byCategory === void 0) return;
+	const parts = CONTEXT_CATEGORIES.map(([key, label]) => [label, byCategory[key] ?? 0]).filter(([, value]) => value > 0);
+	const total = parts.reduce((sum, [, value]) => sum + value, 0);
+	if (total === 0) return;
+	const size = binding.contextSize;
+	const share = size === void 0 || size <= 0 ? "" : `（${(total / size * 100).toFixed(1)}%）`;
+	const window = size === void 0 ? "" : ` / ${formatTokens(size)}`;
+	const body = parts.map(([label, value]) => `${label} ${formatTokens(value)}`).join(" · ");
+	const text = `上下文 ${formatTokens(total)}${window}${share}｜${body}`;
+	yield {
+		type: "block-start",
+		index,
+		blockType: "reasoning"
+	};
+	yield {
+		type: "reasoning-delta",
+		index,
+		text
+	};
+	yield {
+		type: "block-end",
+		index,
+		block: {
+			type: "reasoning",
+			text
+		}
+	};
+}
 var AcpAdapter = class extends LlmAdapter {
 	agents = /* @__PURE__ */ new Map();
 	bindings = /* @__PURE__ */ new Map();
@@ -11543,8 +11597,13 @@ var AcpAdapter = class extends LlmAdapter {
 		agent.prompt(session, prompt, (update) => {
 			armIdle();
 			trace.update(update.sessionUpdate, update.sessionUpdate === "agent_message_chunk" && update.content.type === "text" ? update.content.text : void 0);
-			if (update.sessionUpdate === "usage_update" && update.size > 0) this.contextWindows.set(route, model, update.size);
-			else if (update.sessionUpdate === "config_option_update") applyConfigOptions(session, update.configOptions);
+			if (update.sessionUpdate === "usage_update" && update.size > 0) {
+				this.contextWindows.set(route, model, update.size);
+				binding.contextSize = update.size;
+				const meta = Reflect.get(update, "_meta");
+				const byCategory = typeof meta === "object" && meta !== null ? Reflect.get(meta, "codebuddy.ai/usageByCategory") : void 0;
+				if (typeof byCategory === "object" && byCategory !== null) binding.breakdown = byCategory;
+			} else if (update.sessionUpdate === "config_option_update") applyConfigOptions(session, update.configOptions);
 			queue.push(...translator.push(update));
 			notify();
 		}).then((response) => settle({
@@ -11622,13 +11681,18 @@ var AcpAdapter = class extends LlmAdapter {
 		}
 		switch (response.stopReason) {
 			case "end_turn":
-				yield translator.emittedBlocks === 0 ? {
-					type: "finish",
-					reason: {
-						kind: "error",
-						failure: failure("EMPTY_RESPONSE", "ACP agent ended the turn without any content")
-					}
-				} : {
+				if (translator.emittedBlocks === 0) {
+					yield {
+						type: "finish",
+						reason: {
+							kind: "error",
+							failure: failure("EMPTY_RESPONSE", "ACP agent ended the turn without any content")
+						}
+					};
+					return;
+				}
+				yield* contextReport(binding, translator.emittedBlocks);
+				yield {
 					type: "finish",
 					reason: { kind: "stop" }
 				};

@@ -44,7 +44,7 @@ export const AGENTS_CSS = `
 .dta-usage-legend{display:flex;flex-wrap:wrap;gap:8px 14px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}
 .dta-usage-legend span{display:inline-flex;align-items:center;gap:6px;font-variant-numeric:tabular-nums}
 .dta-usage-legend i{width:8px;height:8px;border-radius:2px;flex:none}
-.dta-context-view{padding:0 0 24px}
+.dta-context-view{padding:0 0 180px}
 .dta-section-label{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-top:6px;font-size:13px;line-height:20px;font-weight:500}
 .dta-inline-label{flex:none;min-width:56px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}
 .dta-input-narrow{flex:none;width:88px}

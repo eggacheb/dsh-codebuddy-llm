@@ -20,7 +20,15 @@ const VIEW_ORDER = 50
 export function registerContextView(ctx: AcpClientContext): () => void {
   const t = translator(ctx.locale)
   return ctx.configForms.whileServed([ENTRY], () => {
-    const props: ContextViewProps = { form: ctx.configForms.get(ENTRY), t }
+    // dsh 自己的 compaction-basic 没有 settings namespace；能读就显示真实状态，读不到就如实说。
+    let compaction: ContextViewProps['compaction']
+    try {
+      compaction = ctx.configForms.get('compaction-basic')
+    }
+    catch {
+      compaction = undefined
+    }
+    const props: ContextViewProps = { form: ctx.configForms.get(ENTRY), compaction, t }
     return ctx.slots.inject('conversation.view', () => ctx.slots.register({
       name: 'conversation.view',
       id: VIEW_ID,

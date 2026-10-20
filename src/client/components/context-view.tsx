@@ -68,8 +68,23 @@ interface Edits {
 
 export interface ContextViewProps {
   form: ConfigForm
+  /** dsh 自己的 compaction-basic 表单；读不到时为 undefined。 */
+  compaction?: ConfigForm
   t: Translate
 }
+
+const COMPACTION_FALLBACK: ConfigForm = {
+  getSnapshot: () => ({ status: 'unavailable', value: undefined, base: undefined, user: undefined, revision: undefined, writable: false, mode: 'host' }),
+  subscribe: () => () => {},
+  mutate: async () => false,
+}
+
+const COMPACTION_YAML = `- id: compaction-basic
+  name: '@deepseek-ai/dsh-compaction-basic'
+  disabled: false
+  config:
+    thresholdRatio: 0.8
+    retainRatio: 0.16`
 
 /**
  * 会话标签页：窗口与压缩都在这改，不用离开对话。
@@ -78,13 +93,22 @@ export interface ContextViewProps {
  * - **dsh 窗口** = dsh 认为的上下文上限，`compaction-basic` 未启用时它只是上限提示。
  * - **CodeBuddy 压缩窗口** = 真正在压的那个；触发点 = 窗口 × 比例。
  */
-export function ContextView({ form, t }: ContextViewProps): ReactElement {
+export function ContextView({ form, compaction, t }: ContextViewProps): ReactElement {
   // ConfigForm methods read their own `this`; never hand them to React unbound.
   const subscribe = useCallback((listener: () => void) => form.subscribe(listener), [form])
   const getSnapshot = useCallback(() => form.getSnapshot(), [form])
   const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
   const agents = useMemo(() => snapshotOf(snapshot), [snapshot])
   const writable = snapshot.status === 'ready' && agents.writable
+
+  const compactionForm = compaction ?? COMPACTION_FALLBACK
+  const compactionSubscribe = useCallback((listener: () => void) => compactionForm.subscribe(listener), [compactionForm])
+  const compactionGet = useCallback(() => compactionForm.getSnapshot(), [compactionForm])
+  const compactionSnapshot = useSyncExternalStore(compactionSubscribe, compactionGet, compactionGet)
+  const compactionValue = compactionSnapshot.value as { disabled?: boolean, config?: { thresholdRatio?: number, retainRatio?: number } } | undefined
+  const compactionKnown = compactionSnapshot.status === 'ready' && compactionValue !== undefined
+  const compactionEnabled = compactionKnown ? compactionValue?.disabled !== true : undefined
+  const compactionRatio = compactionValue?.config?.thresholdRatio
 
   const [edits, setEdits] = useState<Record<string, Edits>>({})
   const [saving, setSaving] = useState<string | null>(null)
@@ -256,7 +280,29 @@ export function ContextView({ form, t }: ContextViewProps): ReactElement {
           </div>
         )
       })}
-      <div className="dta-hint dta-footnote">{t('contextDshCompactNote')}</div>
+      <div className="dta-footnote">
+        <div className="dta-section-label">{t('contextDshCompact')}</div>
+        <div className="dta-hint">
+          {compactionKnown
+            ? compactionEnabled
+              ? t('contextDshCompactOn', { ratio: compactionRatio === undefined ? '0.8' : String(compactionRatio) })
+              : t('contextDshCompactOff')
+            : t('contextDshCompactUnknown')}
+        </div>
+        <div className="dta-hint">{t('contextDshCompactNote')}</div>
+        <div className="dta-window-row dta-window-actions">
+          <button
+            type="button"
+            className="dta-chip"
+            onClick={() => {
+              void navigator.clipboard?.writeText(COMPACTION_YAML)
+              setNote(t('contextDshCompactCopied'))
+            }}
+          >
+            {t('contextDshCompactCopy')}
+          </button>
+        </div>
+      </div>
       {note !== null && <div className="dta-banner" data-tone="ok">{note}</div>}
     </div>
   )

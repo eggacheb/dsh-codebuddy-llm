@@ -4,7 +4,10 @@ import type { AgentDraft, AgentRow, AgentsSnapshot, DraftValidation } from './ag
 import { ROUTE_PATTERN } from '../constants/index.ts'
 
 /** Profile keys the editor owns; everything else in a stored profile is carried over untouched. */
-const EDITED_KEYS = ['displayName', 'command', 'args', 'env', 'authMethod', 'permission', 'imageInput', 'models'] as const
+/** 与 host schema 的 `DEFAULT_CONTEXT_WINDOW` 保持一致：新建路由默认 200k。 */
+const DEFAULT_CONTEXT_WINDOW = 200_000
+
+const EDITED_KEYS = ['displayName', 'command', 'args', 'env', 'authMethod', 'permission', 'imageInput', 'models', 'contextWindow'] as const
 
 type JsonObject = Record<string, JsonValue>
 
@@ -108,7 +111,7 @@ export function parseEnv(text: string): { ok: true, env: Record<string, string> 
 }
 
 export function emptyDraft(): AgentDraft {
-  return { originalRoute: null, route: '', displayName: '', command: '', args: '', env: '', authMethod: '', permission: 'ask', imageInput: 'auto', models: [] }
+  return { originalRoute: null, route: '', displayName: '', command: '', args: '', env: '', authMethod: '', permission: 'ask', imageInput: 'auto', models: [], contextWindow: DEFAULT_CONTEXT_WINDOW }
 }
 
 export function draftOf(row: AgentRow): AgentDraft {
@@ -124,6 +127,7 @@ export function draftOf(row: AgentRow): AgentDraft {
     permission: profile.permission,
     imageInput: profile.imageInput,
     models: profile.models.map(model => ({ ...model })),
+    contextWindow: profile.contextWindow,
   }
 }
 
@@ -180,6 +184,7 @@ export function validateDraft(draft: AgentDraft, rows: readonly AgentRow[]): Dra
     permission: draft.permission,
     ...draft.imageInput === 'auto' ? {} : { imageInput: draft.imageInput },
     ...draft.models.length > 0 ? { models: draft.models.map(modelJson) } : {},
+    ...draft.contextWindow === DEFAULT_CONTEXT_WINDOW ? {} : { contextWindow: draft.contextWindow },
   }
   return { ok: true, route, profile }
 }

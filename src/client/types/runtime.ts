@@ -53,9 +53,23 @@ export interface SettingsSectionEntry<P> {
   inject: () => P
 }
 
+/** A session-scoped tab beside Chat / Trajectory (`conversation.view`). */
+export interface ConversationViewEntry<P> {
+  name: 'conversation.view'
+  id: string
+  order?: number
+  locale: string
+  label: () => string
+  /** Receives the bound session id; return the props the component reads. */
+  inject?: (sessionId: string) => P
+}
+
 export interface SlotsService {
   inject: (name: string, register: () => () => void) => () => void
-  register: <P extends object>(entry: SettingsSectionEntry<P>, component: ComponentType<P>) => () => void
+  register: <P extends object>(
+    entry: SettingsSectionEntry<P> | ConversationViewEntry<P>,
+    component: ComponentType<P>,
+  ) => () => void
 }
 
 export interface RemoteFailure {

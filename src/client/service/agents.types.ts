@@ -31,6 +31,8 @@ export interface AgentDraft {
   permission: PermissionPolicy
   imageInput: ImageInputMode
   models: AcpModelProfile[]
+  /** Tokens dsh allows before compacting history; the agent's own window may be larger. */
+  contextWindow: number
 }
 
 /** Localized validation failure; `key` names a locale entry. */

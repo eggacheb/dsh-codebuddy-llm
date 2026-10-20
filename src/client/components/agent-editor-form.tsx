@@ -5,6 +5,7 @@ import type { AgentDraft } from '../service/agents.types.ts'
 import type { Message } from './agents-section.tsx'
 import { Button, IconChevronLeftOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
 import { AgentModelsEditor } from './agent-models-editor.tsx'
+import { ContextUsageHint } from './context-usage.tsx'
 
 export interface AgentEditorFormProps {
   t: Translate
@@ -40,6 +41,14 @@ const IMAGE_INPUTS: readonly { value: ImageInputMode, key: 'imageInputAuto' | 'i
 
 function isImageInput(value: string): value is ImageInputMode {
   return IMAGE_INPUTS.some(option => option.value === value)
+}
+
+/** 窗口大小的一键档位；数字只是常见取值，不代替 Agent 自己的真实窗口。 */
+const WINDOW_PRESETS = [300_000, 600_000, 1_000_000] as const
+
+/** 路由 env 里开了门禁，CodeBuddy 才会走它自己的 Agent 预设（工具集因此变小）。 */
+function presetEnabled(env: string): boolean {
+  return /^CODEBUDDY_MAIN_AGENT_ALLOW_UNOPTED\s*=\s*(1|true|yes|on)$/im.test(env)
 }
 
 function Field({ label, hint, children }: { label: string, hint?: string, children: ReactNode }): ReactElement {
@@ -145,6 +154,40 @@ export function AgentEditorForm(props: AgentEditorFormProps): ReactElement {
         >
           {IMAGE_INPUTS.map(option => <option key={option.value} value={option.value}>{t(option.key)}</option>)}
         </select>
+      </Field>
+      <Field label={t('contextWindow')} hint={t('contextWindowHint')}>
+        <div className="dta-window-row">
+          <input
+            className="dta-input"
+            type="number"
+            min={1000}
+            step={1000}
+            value={draft.contextWindow}
+            disabled={disabled}
+            onChange={(event) => {
+              const value = Number(event.target.value)
+              if (Number.isFinite(value) && value > 0)
+                onChange({ contextWindow: Math.round(value) })
+            }}
+          />
+          {WINDOW_PRESETS.map(option => (
+            <button
+              key={option}
+              type="button"
+              className="dta-chip"
+              data-active={draft.contextWindow === option}
+              disabled={disabled}
+              onClick={() => onChange({ contextWindow: option })}
+            >
+              {option >= 1_000_000 ? `${option / 1_000_000}M` : `${option / 1000}K`}
+            </button>
+          ))}
+        </div>
+        <ContextUsageHint
+          contextWindow={draft.contextWindow}
+          presetEnabled={presetEnabled(draft.env)}
+          t={t}
+        />
       </Field>
       <div className="dta-field">
         <span className="dta-field-label">{t('models')}</span>

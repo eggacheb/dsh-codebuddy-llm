@@ -52,9 +52,11 @@ const PASSTHROUGH_ENV = ['CODEBUDDY_AUTH_TOKEN', 'CODEBUDDY_API_KEY']
  *
  * 这几组不是「安全」问题，而是会直接改掉 CLI 的行为：`CLIENT_INFO_*` 六项凑齐会让它
  * 判定在宿主里跑并转去要宿主 token（401）；`SERVER__*` 会和宿主抢网关端口；
- * `CODEBUDDY_CONFIG_DIR` 会把它指到另一个配置目录、读不到自己的登录态。
+ * `CODEBUDDY_CONFIG_DIR` 会把它指到另一个配置目录、读不到自己的登录态；
+ * `CODEBUDDY_ENABLE_SECURITY_AUDIT` 会打开内置审计，把 REPL 这类工具在
+ * PreToolUse 阶段直接拒掉（日志里是 `Tool REPL blocked by PreToolUse hook`）。
  */
-const HOSTILE_ENV = /^(?:CLIENT_INFO_|SERVER__|DSH_|CLAUDE_|CODEBUDDY_CONFIG_DIR)/
+const HOSTILE_ENV = /^(?:CLIENT_INFO_|SERVER__|DSH_|CLAUDE_|CODEBUDDY_CONFIG_DIR|CODEBUDDY_ENABLE_SECURITY_AUDIT)/
 
 /** 指向宿主机器的代理只服务宿主自身进程，外部 CLI 用不上。 */
 const LOCAL_PROXY = /^(https?|socks5?):\/\/(127\.0\.0\.1|localhost|\[::1\])(:|\/|$)/i

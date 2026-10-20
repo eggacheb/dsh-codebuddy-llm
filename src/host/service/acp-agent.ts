@@ -177,6 +177,11 @@ export class AcpAgentProcess {
   private advertised: AcpAdvertisedModel[] | undefined
   private efforts: AcpSessionEfforts | undefined
   private discovering: Promise<readonly AcpAdvertisedModel[]> | undefined
+  /**
+   * ACP 一次只处理一个 `session/prompt`。dsh 每轮还会并发一个标题生成的
+   * ephemeral 会话，两个请求同时飞会互相排队甚至丢更新，所以在这一层串起来。
+   */
+  private gate: Promise<unknown> = Promise.resolve()
 
   constructor(private readonly options: AcpAgentOptions) {}
 
@@ -306,6 +311,11 @@ export class AcpAgentProcess {
 
   async prompt(session: AcpSession, prompt: AcpContentBlock[], onUpdate: (update: SessionUpdate) => void): Promise<PromptResponse> {
     const live = this.requireLive(session.generation)
+    const previous = this.gate
+    let release!: () => void
+    this.gate = new Promise<void>((resolve) => { release = resolve })
+    // 前一个请求失败/被取消也要放行，否则后面全卡死。
+    await previous.catch(() => {})
     this.listeners.set(session.sessionId, onUpdate)
     try {
       return await live.connection.agent.request(methods.agent.session.prompt, { sessionId: session.sessionId, prompt })
@@ -316,6 +326,7 @@ export class AcpAgentProcess {
     finally {
       if (this.listeners.get(session.sessionId) === onUpdate)
         this.listeners.delete(session.sessionId)
+      release()
     }
   }
 
@@ -421,7 +432,7 @@ export class AcpAgentProcess {
       // 子进程环境用白名单构造：宿主的 CLIENT_INFO_* 一旦整套进去，CLI 会切到宿主集成
       // 认证从而读不到自己的登录态；SERVER__PORT 则会让父子抢同一个网关端口。
       // 路由自己的 env 是最后合并的，要加什么都在那里加。
-      env: childEnv(process.env, profile.env),
+      env: childEnv(process.env, profile.env, profile.envMode),
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
       shell: needsShell(profile.command),

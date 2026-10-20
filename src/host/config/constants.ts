@@ -85,6 +85,8 @@ export function defaultCodeBuddyProfile(): AcpAgentProfile | undefined {
     // 用 env 而不是让用户改全局设置：`resolveMainAgentPolicy()` 里环境变量的优先级高于
     // settings，所以这条只影响本路由的子进程，不会波及 WorkBuddy 自己的 sidecar。
     env: { CODEBUDDY_MAIN_AGENT_ALLOW_UNOPTED: '1' },
+    // 白名单是默认，也是这个插件最脆的一环；想放开就把这条改成 inherit。
+    envMode: 'whitelist',
     // 留空表示「让 Agent 自己报」。CodeBuddy 在 session/new 里给了 availableModels
     // （deepseek-v4.1-flash / glm-5.3 / kimi-k3-1 …）和一个 thought_level 选项
     // （low / high / max / enabled），但两者都只有在**建过一次会话**之后才拿得到。
@@ -105,6 +107,6 @@ export function defaultCodeBuddyProfile(): AcpAgentProfile | undefined {
     // Agent 自己通过 usage_update 上报过之后，仍以它为准。
     contextWindow: CODEBUDDY_CONTEXT_WINDOW,
     startupTimeoutMs: 60_000,
-    idleTimeoutMs: 600_000,
+    idleTimeoutMs: 180_000,
   }
 }

@@ -9,6 +9,22 @@ interface OpenBlock {
   text: string
 }
 
+
+/** 从 tool_call 的 rawInput 里挑一个最像「在哪儿/做了什么」的字段，压成一行。 */
+function describeInput(rawInput: unknown): string {
+  if (typeof rawInput !== 'object' || rawInput === null)
+    return ''
+  const record = rawInput as Record<string, unknown>
+  for (const key of ['file_path', 'path', 'notebook_path', 'command', 'pattern', 'query', 'url']) {
+    const value = record[key]
+    if (typeof value !== 'string' || value.length === 0)
+      continue
+    const text = value.replace(/\s+/g, ' ').trim()
+    return ` · ${text.length > 80 ? `${text.slice(0, 80)}…` : text}`
+  }
+  return ''
+}
+
 const PLAN_MARK: Record<PlanEntry['status'], string> = {
   pending: '[ ]',
   in_progress: '[~]',
@@ -39,7 +55,7 @@ export class ChunkTranslator {
           return []
         this.tools.set(update.toolCallId, { title: update.title, status: update.status })
         const status = update.status !== undefined && TERMINAL_STATUS.has(update.status) ? ` (${update.status})` : ''
-        return this.append('reasoning', `${this.separator()}▸ [${update.kind ?? 'tool'}] ${update.title}${status}\n`)
+        return this.append('reasoning', `${this.separator()}▸ [${update.kind ?? 'tool'}] ${update.title}${describeInput(update.rawInput)}${status}\n`)
       }
       case 'tool_call_update': {
         if (!this.showToolCalls)

@@ -12,6 +12,11 @@ type SystemPromptMode = 'drop' | 'forward';
  * declares in its ACP handshake; the other two override an agent that misreports them.
  */
 type ImageInputMode = 'auto' | 'force' | 'off';
+/**
+ * `whitelist`：只放行已知安全的变量（默认）。
+ * `inherit`：继承宿主环境，仅挡掉会改变 CLI 认证判定或抢端口的那些。
+ */
+type EnvMode = 'whitelist' | 'inherit';
 interface AcpModelProfile {
   id: string;
   name?: string;
@@ -23,6 +28,7 @@ interface AcpAgentProfile {
   command: string;
   args: string[];
   env: Record<string, string>;
+  envMode: EnvMode;
   cwd?: string;
   authMethod?: string;
   models: AcpModelProfile[];

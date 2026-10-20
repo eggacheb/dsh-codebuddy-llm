@@ -1,3 +1,4 @@
+import type { EnvMode } from '../../shared/types.ts'
 import process from 'node:process'
 
 /**
@@ -41,6 +42,15 @@ const SAFE_ENV_KEYS = [
  */
 const PASSTHROUGH_ENV = ['CODEBUDDY_AUTH_TOKEN', 'CODEBUDDY_API_KEY']
 
+/**
+ * `inherit` 模式下仍然要挡掉的变量。
+ *
+ * 这几组不是「安全」问题，而是会直接改掉 CLI 的行为：`CLIENT_INFO_*` 六项凑齐会让它
+ * 判定在宿主里跑并转去要宿主 token（401）；`SERVER__*` 会和宿主抢网关端口；
+ * `CODEBUDDY_CONFIG_DIR` 会把它指到另一个配置目录、读不到自己的登录态。
+ */
+const HOSTILE_ENV = /^(?:CLIENT_INFO_|SERVER__|DSH_|CLAUDE_|CODEBUDDY_CONFIG_DIR)/
+
 /** 指向宿主机器的代理只服务宿主自身进程，外部 CLI 用不上。 */
 const LOCAL_PROXY = /^(https?|socks5?):\/\/(127\.0\.0\.1|localhost|\[::1\])(:|\/|$)/i
 
@@ -71,7 +81,11 @@ function windowsPath(raw: string | undefined): string {
 export function childEnv(
   source: NodeJS.ProcessEnv = process.env,
   extra: NodeJS.ProcessEnv = {},
+  mode: EnvMode = 'whitelist',
 ): NodeJS.ProcessEnv {
+  if (mode === 'inherit')
+    return inheritEnv(source, extra)
+
   const env: NodeJS.ProcessEnv = {}
   for (const key of SAFE_ENV_KEYS) {
     const value = source[key]
@@ -104,5 +118,26 @@ export function childEnv(
       env[key] = value
   }
 
+  return { ...env, ...extra }
+}
+
+/**
+ * `inherit`：继承宿主环境，只挡掉 {@link HOSTILE_ENV} 和指向本机的代理。
+ *
+ * 给「白名单漏了某个变量」的场景兜底——比如 Git Bash 的 HOME、用户自己的
+ * API key、内网代理。代价是宿主以后新增同类变量时会自动漏进来，所以默认不开。
+ */
+function inheritEnv(source: NodeJS.ProcessEnv, extra: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {}
+  for (const [key, value] of Object.entries(source)) {
+    if (value === undefined || HOSTILE_ENV.test(key))
+      continue
+    env[key] = value
+  }
+  for (const key of PROXY_KEYS) {
+    const value = env[key]
+    if (value !== undefined && LOCAL_PROXY.test(value.trim()))
+      delete env[key]
+  }
   return { ...env, ...extra }
 }

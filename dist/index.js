@@ -76,6 +76,7 @@ function defaultCodeBuddyProfile() {
 			DEFAULT_CODEBUDDY_MODEL
 		],
 		env: { CODEBUDDY_MAIN_AGENT_ALLOW_UNOPTED: "1" },
+		envMode: "whitelist",
 		models: [],
 		discoverModels: true,
 		permission: "allow",
@@ -84,12 +85,12 @@ function defaultCodeBuddyProfile() {
 		showToolCalls: true,
 		contextWindow: CODEBUDDY_CONTEXT_WINDOW,
 		startupTimeoutMs: 6e4,
-		idleTimeoutMs: 6e5
+		idleTimeoutMs: 18e4
 	};
 }
 //#endregion
 //#region src/host/config/schema.ts
-const DEFAULT_IDLE_TIMEOUT_MS = 6e5;
+const DEFAULT_IDLE_TIMEOUT_MS = 18e4;
 const DEFAULT_STARTUP_TIMEOUT_MS = 6e4;
 const AcpModelProfile = z.object({
 	id: z.string().required(),
@@ -102,6 +103,7 @@ const AcpAgentProfile = z.object({
 	command: z.string().required(),
 	args: z.array(z.string()).default([]),
 	env: z.dict(z.string()).default({}),
+	envMode: z.union(["whitelist", "inherit"]).default("whitelist"),
 	cwd: z.string(),
 	authMethod: z.string(),
 	models: z.array(AcpModelProfile).default([]),
@@ -10180,6 +10182,14 @@ const SAFE_ENV_KEYS = [
 * 用户显式设置时应当生效（否则等于把「用环境变量登录」的人踢下线）。
 */
 const PASSTHROUGH_ENV = ["CODEBUDDY_AUTH_TOKEN", "CODEBUDDY_API_KEY"];
+/**
+* `inherit` 模式下仍然要挡掉的变量。
+*
+* 这几组不是「安全」问题，而是会直接改掉 CLI 的行为：`CLIENT_INFO_*` 六项凑齐会让它
+* 判定在宿主里跑并转去要宿主 token（401）；`SERVER__*` 会和宿主抢网关端口；
+* `CODEBUDDY_CONFIG_DIR` 会把它指到另一个配置目录、读不到自己的登录态。
+*/
+const HOSTILE_ENV = /^(?:CLIENT_INFO_|SERVER__|DSH_|CLAUDE_|CODEBUDDY_CONFIG_DIR)/;
 /** 指向宿主机器的代理只服务宿主自身进程，外部 CLI 用不上。 */
 const LOCAL_PROXY = /^(https?|socks5?):\/\/(127\.0\.0\.1|localhost|\[::1\])(:|\/|$)/i;
 const PROXY_KEYS = [
@@ -10205,7 +10215,8 @@ function windowsPath(raw) {
 * 与「继承再剔除」的差别不只是安全：白名单之外的一切都进不了子进程，所以宿主以后新增
 * 某个同类变量时这里不需要跟着改。真正要加的按路由写进 profile 的 `env`，它最后合并。
 */
-function childEnv(source = process.env, extra = {}) {
+function childEnv(source = process.env, extra = {}, mode = "whitelist") {
+	if (mode === "inherit") return inheritEnv(source, extra);
 	const env = {};
 	for (const key of SAFE_ENV_KEYS) {
 		const value = source[key];
@@ -10226,6 +10237,27 @@ function childEnv(source = process.env, extra = {}) {
 	for (const key of NO_PROXY_KEYS) {
 		const value = source[key];
 		if (value !== void 0 && value.length > 0) env[key] = value;
+	}
+	return {
+		...env,
+		...extra
+	};
+}
+/**
+* `inherit`：继承宿主环境，只挡掉 {@link HOSTILE_ENV} 和指向本机的代理。
+*
+* 给「白名单漏了某个变量」的场景兜底——比如 Git Bash 的 HOME、用户自己的
+* API key、内网代理。代价是宿主以后新增同类变量时会自动漏进来，所以默认不开。
+*/
+function inheritEnv(source, extra) {
+	const env = {};
+	for (const [key, value] of Object.entries(source)) {
+		if (value === void 0 || HOSTILE_ENV.test(key)) continue;
+		env[key] = value;
+	}
+	for (const key of PROXY_KEYS) {
+		const value = env[key];
+		if (value !== void 0 && LOCAL_PROXY.test(value.trim())) delete env[key];
 	}
 	return {
 		...env,
@@ -10421,6 +10453,11 @@ var AcpAgentProcess = class {
 	advertised;
 	efforts;
 	discovering;
+	/**
+	* ACP 一次只处理一个 `session/prompt`。dsh 每轮还会并发一个标题生成的
+	* ephemeral 会话，两个请求同时飞会互相排队甚至丢更新，所以在这一层串起来。
+	*/
+	gate = Promise.resolve();
 	constructor(options) {
 		this.options = options;
 	}
@@ -10524,6 +10561,12 @@ var AcpAgentProcess = class {
 	}
 	async prompt(session, prompt, onUpdate) {
 		const live = this.requireLive(session.generation);
+		const previous = this.gate;
+		let release;
+		this.gate = new Promise((resolve) => {
+			release = resolve;
+		});
+		await previous.catch(() => {});
 		this.listeners.set(session.sessionId, onUpdate);
 		try {
 			return await live.connection.agent.request(methods.agent.session.prompt, {
@@ -10534,6 +10577,7 @@ var AcpAgentProcess = class {
 			throw this.transportError("session/prompt", error);
 		} finally {
 			if (this.listeners.get(session.sessionId) === onUpdate) this.listeners.delete(session.sessionId);
+			release();
 		}
 	}
 	cancel(session) {
@@ -10609,7 +10653,7 @@ var AcpAgentProcess = class {
 		this.lastCwd = cwd;
 		const child = spawn(profile.command, profile.args, {
 			cwd,
-			env: childEnv(process.env, profile.env),
+			env: childEnv(process.env, profile.env, profile.envMode),
 			stdio: [
 				"pipe",
 				"pipe",
@@ -10732,6 +10776,26 @@ var AcpAgentProcess = class {
 };
 //#endregion
 //#region src/host/service/chunk-translator.ts
+/** 从 tool_call 的 rawInput 里挑一个最像「在哪儿/做了什么」的字段，压成一行。 */
+function describeInput(rawInput) {
+	if (typeof rawInput !== "object" || rawInput === null) return "";
+	const record = rawInput;
+	for (const key of [
+		"file_path",
+		"path",
+		"notebook_path",
+		"command",
+		"pattern",
+		"query",
+		"url"
+	]) {
+		const value = record[key];
+		if (typeof value !== "string" || value.length === 0) continue;
+		const text = value.replace(/\s+/g, " ").trim();
+		return ` · ${text.length > 80 ? `${text.slice(0, 80)}…` : text}`;
+	}
+	return "";
+}
 const PLAN_MARK = {
 	pending: "[ ]",
 	in_progress: "[~]",
@@ -10759,7 +10823,7 @@ var ChunkTranslator = class {
 					status: update.status
 				});
 				const status = update.status !== void 0 && TERMINAL_STATUS.has(update.status) ? ` (${update.status})` : "";
-				return this.append("reasoning", `${this.separator()}▸ [${update.kind ?? "tool"}] ${update.title}${status}\n`);
+				return this.append("reasoning", `${this.separator()}▸ [${update.kind ?? "tool"}] ${update.title}${describeInput(update.rawInput)}${status}\n`);
 			}
 			case "tool_call_update": {
 				if (!this.showToolCalls) return [];

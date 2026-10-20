@@ -53,6 +53,7 @@ function profileOf(raw: JsonObject): AcpAgentProfile {
     command: typeof raw.command === 'string' ? raw.command : '',
     args: stringArrayOf(raw.args),
     env: stringRecordOf(raw.env),
+    envMode: raw.envMode === 'inherit' ? 'inherit' : 'whitelist',
     ...typeof raw.cwd === 'string' ? { cwd: raw.cwd } : {},
     ...typeof raw.authMethod === 'string' ? { authMethod: raw.authMethod } : {},
     models: modelsOf(raw.models),

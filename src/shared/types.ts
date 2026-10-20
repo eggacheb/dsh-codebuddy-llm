@@ -10,6 +10,12 @@ export type SystemPromptMode = 'drop' | 'forward'
  */
 export type ImageInputMode = 'auto' | 'force' | 'off'
 
+/**
+ * `whitelist`：只放行已知安全的变量（默认）。
+ * `inherit`：继承宿主环境，仅挡掉会改变 CLI 认证判定或抢端口的那些。
+ */
+export type EnvMode = 'whitelist' | 'inherit'
+
 export interface AcpModelProfile {
   id: string
   name?: string
@@ -22,6 +28,7 @@ export interface AcpAgentProfile {
   command: string
   args: string[]
   env: Record<string, string>
+  envMode: EnvMode
   cwd?: string
   authMethod?: string
   models: AcpModelProfile[]

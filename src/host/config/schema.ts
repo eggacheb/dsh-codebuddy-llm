@@ -3,7 +3,7 @@ import type { AcpAgentProfile, AcpModelProfile } from '../../shared/types.ts'
 import z from '@deepseek-ai/schemastery'
 import { DEFAULT_CONTEXT_WINDOW, defaultCodeBuddyProfile } from './constants.ts'
 
-const DEFAULT_IDLE_TIMEOUT_MS = 600_000
+const DEFAULT_IDLE_TIMEOUT_MS = 180_000
 
 const DEFAULT_STARTUP_TIMEOUT_MS = 60_000
 
@@ -29,6 +29,7 @@ const AcpAgentProfile: z<AcpAgentProfile> = z.object({
   command: z.string().required(),
   args: z.array(z.string()).default([]),
   env: z.dict(z.string()).default({}),
+  envMode: z.union(['whitelist', 'inherit'] as const).default('whitelist'),
   cwd: z.string(),
   authMethod: z.string(),
   models: z.array(AcpModelProfile).default([]),

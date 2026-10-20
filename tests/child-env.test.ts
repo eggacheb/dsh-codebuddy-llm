@@ -108,3 +108,34 @@ describe('child environment', () => {
     })
   })
 })
+
+describe('HOME fallback', () => {
+  const source = { USERPROFILE: 'C:////Users////someone', PATH: 'C:////Windows' }
+
+  it('whitelist: fills HOME from USERPROFILE so Git Bash can find its profile', () => {
+    expect(childEnv(source).HOME).toBe('C:////Users////someone')
+  })
+
+  it('inherit: same fallback, even though the host itself never sets HOME', () => {
+    expect(childEnv(source, {}, 'inherit').HOME).toBe('C:////Users////someone')
+  })
+
+  it('keeps an explicit HOME instead of overwriting it', () => {
+    expect(childEnv({ ...source, HOME: 'D:////home' }, {}, 'inherit').HOME).toBe('D:////home')
+  })
+})
+
+describe('inherit mode', () => {
+  it('keeps ordinary host variables the whitelist would drop', () => {
+    const env = childEnv({ ...HOSTILE, MY_PROXY_TOKEN: 'secret' }, {}, 'inherit')
+    expect(env.MY_PROXY_TOKEN).toBe('secret')
+  })
+
+  it('still blocks the variables that break auth or steal the gateway port', () => {
+    const env = childEnv(HOSTILE, {}, 'inherit')
+    expect(env.CLIENT_INFO_IDE_TYPE).toBeUndefined()
+    expect(env.SERVER__PORT).toBeUndefined()
+    expect(env.CODEBUDDY_CONFIG_DIR).toBeUndefined()
+  })
+})
+

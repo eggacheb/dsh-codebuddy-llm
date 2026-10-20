@@ -10259,6 +10259,7 @@ function inheritEnv(source, extra) {
 		const value = env[key];
 		if (value !== void 0 && LOCAL_PROXY.test(value.trim())) delete env[key];
 	}
+	if (env.HOME === void 0 && env.USERPROFILE !== void 0) env.HOME = env.USERPROFILE;
 	return {
 		...env,
 		...extra

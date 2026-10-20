@@ -139,5 +139,9 @@ function inheritEnv(source: NodeJS.ProcessEnv, extra: NodeJS.ProcessEnv): NodeJS
     if (value !== undefined && LOCAL_PROXY.test(value.trim()))
       delete env[key]
   }
+  // 宿主进程通常只有 USERPROFILE；Git Bash 的 `-l` 却认 HOME。两套模式都得补，
+  // 否则 inherit 反而比白名单更容易缺这一项。
+  if (env.HOME === undefined && env.USERPROFILE !== undefined)
+    env.HOME = env.USERPROFILE
   return { ...env, ...extra }
 }

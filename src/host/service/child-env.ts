@@ -23,6 +23,9 @@ import process from 'node:process'
  * CodeBuddy CLI 启动时会 bind 一个本地网关端口并照读这两个变量，于是父子抢同一个
  * 地址、子进程一启动就 `EADDRINUSE` 退出。白名单天然挡掉它们，CLI 自己 listen(0)。
  */
+/** 一点 PATH 都没有时的兜底：Windows 上至少能找到 cmd 和系统工具。 */
+const FALLBACK_PATH = 'C:\\Windows\\system32;C:\\Windows;C:\\Windows\\System32\\Wbem'
+
 const SAFE_ENV_KEYS = [
   'SystemRoot', 'SYSTEMROOT', 'windir', 'WINDIR', 'ComSpec', 'COMSPEC',
   'PATHEXT', 'SystemDrive', 'SYSTEMDRIVE',
@@ -34,6 +37,8 @@ const SAFE_ENV_KEYS = [
   // 缺了它 `bash -c -l` 会失败，ptc 模式的 shell snapshot 直接起不来。
   'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE', 'PROCESSOR_IDENTIFIER',
   'OS', 'PSModulePath', 'LANG', 'LC_ALL',
+  // Git Bash 的 `-l` 会按 SHELL 决定用哪个解释器；宿主有就带上，没有也不影响。
+  'SHELL',
 ]
 
 /**
@@ -143,5 +148,10 @@ function inheritEnv(source: NodeJS.ProcessEnv, extra: NodeJS.ProcessEnv): NodeJS
   // 否则 inherit 反而比白名单更容易缺这一项。
   if (env.HOME === undefined && env.USERPROFILE !== undefined)
     env.HOME = env.USERPROFILE
+
+  // PATH 同样要过一遍：Git Bash 的 `/c/...`、`/usr/bin` 对 Windows 的 cmd 没意义，
+  // 留着会让 CLI 的路径探测走偏（最坏情况是找到 MSYS 的 bash 而不是 Git 的）。
+  const path = windowsPath(env.PATH ?? env.Path)
+  env.PATH = path.length > 0 ? path : FALLBACK_PATH
   return { ...env, ...extra }
 }

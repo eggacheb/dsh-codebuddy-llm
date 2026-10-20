@@ -10139,6 +10139,8 @@ new Set([CLIENT_METHODS.session_update, CLIENT_METHODS.elicitation_complete]);
 * CodeBuddy CLI 启动时会 bind 一个本地网关端口并照读这两个变量，于是父子抢同一个
 * 地址、子进程一启动就 `EADDRINUSE` 退出。白名单天然挡掉它们，CLI 自己 listen(0)。
 */
+/** 一点 PATH 都没有时的兜底：Windows 上至少能找到 cmd 和系统工具。 */
+const FALLBACK_PATH = "C:\\Windows\\system32;C:\\Windows;C:\\Windows\\System32\\Wbem";
 const SAFE_ENV_KEYS = [
 	"SystemRoot",
 	"SYSTEMROOT",
@@ -10175,7 +10177,8 @@ const SAFE_ENV_KEYS = [
 	"OS",
 	"PSModulePath",
 	"LANG",
-	"LC_ALL"
+	"LC_ALL",
+	"SHELL"
 ];
 /**
 * 凭据形状的变量默认不转发，但这两个是 CodeBuddy 官方读登录态的入口：
@@ -10260,6 +10263,8 @@ function inheritEnv(source, extra) {
 		if (value !== void 0 && LOCAL_PROXY.test(value.trim())) delete env[key];
 	}
 	if (env.HOME === void 0 && env.USERPROFILE !== void 0) env.HOME = env.USERPROFILE;
+	const path = windowsPath(env.PATH ?? env.Path);
+	env.PATH = path.length > 0 ? path : FALLBACK_PATH;
 	return {
 		...env,
 		...extra

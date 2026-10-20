@@ -10461,11 +10461,6 @@ var AcpAgentProcess = class {
 	advertised;
 	efforts;
 	discovering;
-	/**
-	* ACP 一次只处理一个 `session/prompt`。dsh 每轮还会并发一个标题生成的
-	* ephemeral 会话，两个请求同时飞会互相排队甚至丢更新，所以在这一层串起来。
-	*/
-	gate = Promise.resolve();
 	constructor(options) {
 		this.options = options;
 	}
@@ -10569,12 +10564,6 @@ var AcpAgentProcess = class {
 	}
 	async prompt(session, prompt, onUpdate) {
 		const live = this.requireLive(session.generation);
-		const previous = this.gate;
-		let release;
-		this.gate = new Promise((resolve) => {
-			release = resolve;
-		});
-		await previous.catch(() => {});
 		this.listeners.set(session.sessionId, onUpdate);
 		try {
 			return await live.connection.agent.request(methods.agent.session.prompt, {
@@ -10585,7 +10574,6 @@ var AcpAgentProcess = class {
 			throw this.transportError("session/prompt", error);
 		} finally {
 			if (this.listeners.get(session.sessionId) === onUpdate) this.listeners.delete(session.sessionId);
-			release();
 		}
 	}
 	cancel(session) {

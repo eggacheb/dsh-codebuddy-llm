@@ -10163,6 +10163,7 @@ const SAFE_ENV_KEYS = [
 	"TMP",
 	"HOMEDRIVE",
 	"HOMEPATH",
+	"HOME",
 	"USERNAME",
 	"USERDOMAIN",
 	"COMPUTERNAME",
@@ -10210,6 +10211,7 @@ function childEnv(source = process.env, extra = {}) {
 		const value = source[key];
 		if (value !== void 0) env[key] = value;
 	}
+	if (env.HOME === void 0 && env.USERPROFILE !== void 0) env.HOME = env.USERPROFILE;
 	const path = windowsPath(source.PATH ?? source.Path);
 	env.PATH = path.length > 0 ? path : "C:\\Windows\\system32;C:\\Windows;C:\\Windows\\System32\\Wbem";
 	for (const key of PASSTHROUGH_ENV) {

@@ -28,7 +28,9 @@ const SAFE_ENV_KEYS = [
   'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'PROGRAMDATA', 'ALLUSERSPROFILE',
   'PROGRAMFILES', 'ProgramFiles', 'ProgramW6432', 'ProgramFiles(x86)',
   'CommonProgramFiles', 'CommonProgramFiles(x86)', 'CommonProgramW6432',
-  'TEMP', 'TMP', 'HOMEDRIVE', 'HOMEPATH', 'USERNAME', 'USERDOMAIN', 'COMPUTERNAME',
+  'TEMP', 'TMP', 'HOMEDRIVE', 'HOMEPATH', 'HOME', 'USERNAME', 'USERDOMAIN', 'COMPUTERNAME',
+  // Git Bash 读 HOME 找 ~/.bash_profile；Windows 上通常只设 USERPROFILE。
+  // 缺了它 `bash -c -l` 会失败，ptc 模式的 shell snapshot 直接起不来。
   'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE', 'PROCESSOR_IDENTIFIER',
   'OS', 'PSModulePath', 'LANG', 'LC_ALL',
 ]
@@ -76,6 +78,10 @@ export function childEnv(
     if (value !== undefined)
       env[key] = value
   }
+
+  // Git Bash 在 Windows 上仍然认 HOME；没有就退到 USERPROFILE。
+  if (env.HOME === undefined && env.USERPROFILE !== undefined)
+    env.HOME = env.USERPROFILE
 
   const path = windowsPath(source.PATH ?? source.Path)
   env.PATH = path.length > 0 ? path : 'C:\\Windows\\system32;C:\\Windows;C:\\Windows\\System32\\Wbem'

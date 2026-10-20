@@ -3,3 +3,5 @@ node_modules
 .DS_Store
 # 临时提交信息文件
 .git-msg.txt
+# 临时探针脚本：只用一次，别进仓库
+tmp-*
